@@ -1,0 +1,23 @@
+apiVersion: mwaa.chedaws.io/v1
+kind: Namespace
+metadata:
+  name: cdc
+  owner: cdc-team
+  description: CDC namespace
+
+spec:
+  fargate_enabled: true
+
+  sso_roles:
+    dev:  chedaws-ndp-admin
+    test: chedaws-ndp-admin
+    uat:  chedaws-ndp-admin
+    prod: chedaws-ndp-admin
+
+  ci_roles:
+    dev:
+      - arn:aws:iam::381491832813:role/aws-reserved/sso.amazonaws.com/ap-southeast-2/AWSReservedSSO_chedaws-ndp-admin_c22c9dd786344207
+      - arn:aws:iam::730335239118:role/chedaws-prod-github-runner-InfraBuildRole
+    test:
+      - arn:aws:iam::381491832813:role/aws-reserved/sso.amazonaws.com/ap-southeast-2/AWSReservedSSO_chedaws-ndp-admin_c22c9dd786344207
+      - arn:aws:iam::730335239118:role/chedaws-prod-github-runner-InfraBuildRole

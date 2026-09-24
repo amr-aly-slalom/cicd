@@ -1,0 +1,48 @@
+apiVersion: s3.chedaws.io/v1
+kind: Table
+metadata:
+  namespace: ue-gis
+  name: feeder
+  owner: oms-reporting
+  description: Test table for UE GIS
+spec:
+  decommission: true
+  format: parquet
+  schema:
+    columns:
+      - name: id
+        type: double
+      - name: feeder_label
+        type: string
+      - name: feeder_number
+        type: int
+      - name: isolatable_sections_id
+        type: string
+      - name: known_as
+        type: string
+      - name: operational_level
+        type: string
+      - name: pen_number
+        type: string
+      - name: rating_con_summer
+        type: int
+      - name: rating_con_winter
+        type: int
+      - name: rating_limiting_summer
+        type: int
+      - name: rating_limiting_winter
+        type: int
+      - name: rural_short
+        type: string
+      - name: sap_id
+        type: string
+      - name: scada_id
+        type: string
+      - name: service_provider_region_id
+        type: string
+      - name: stn_busbar_id
+        type: double
+      - name: stn_switch_id
+        type: double
+      - name: zone_substation_id
+        type: double

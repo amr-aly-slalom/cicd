@@ -1,0 +1,49 @@
+terraform-legacy/
+
+# Lambda build artefacts — regenerated at deploy time
+lambda/kafka-e2e-canary/package/
+lambda/kafka-e2e-canary/function.zip
+lambda/s3-e2e-verifier/package/
+lambda/s3-e2e-verifier/function.zip
+
+# Virtual Environment
+# NB: uv.lock is deliberately NOT ignored - it is the pinned dependency set.
+.venv/
+*.pyc
+__pycache__/
+
+# Python tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Terraform modules checkov downloads while scanning (make tf-checkov)
+.external_modules/
+
+# Repo-local tool binaries (make tf-tools)
+.tools/
+
+# dbt-generated artifacts inside any airflow/dags/dbt_projects/*/ project.
+# Not required for deployment - dbt regenerates them at run time - and
+# running dbt locally against these projects for testing leaves them
+# in-tree, since --project-dir/--profiles-dir point at the real path,
+# not a copy.
+airflow/dags/dbt_projects/*/target/
+airflow/dags/dbt_projects/*/logs/
+airflow/dags/dbt_projects/*/dbt_packages/
+airflow/dags/dbt_projects/*/.user.yml
+
+# Staged by .github/actions/publish-ci-image on the runner itself (never
+# inside `docker build` - see that action and docker/ci-image/Dockerfile
+# for why) before docker/ci-image/Dockerfile COPYs them in: fetched tool
+# binaries, this runner's own tar/make/git/unzip/gzip + shared libraries,
+# the synced Python venv, and the baked Terraform provider cache. All
+# generated every run, never meant to be committed.
+docker/ci-image/staged-bin/
+docker/ci-image/staged-lib/
+docker/ci-image/staged-git-core/
+docker/ci-image/staged-venv/
+docker/ci-image/staged-provider-cache/
+docker/ci-image/staged-ca-bundle/
+docker/ci-image/staged-trivy-cache/
+docker/ci-image/staged-uv-python/

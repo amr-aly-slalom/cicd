@@ -1,0 +1,16 @@
+apiVersion: redshift.chedaws.io/v1
+kind: Namespace
+metadata:
+  name: cdc
+  owner: cdc-team
+  description: CDC namespace's Redshift schema
+spec:
+  # The dbt projects create their own schemas (one per source system), so they
+  # get CREATE on the databases rather than a list of schemas.
+  writable_databases:
+    dev:
+      - edp
+      - edp_raw_dev
+    test:
+      - edp
+      - edp_raw_test

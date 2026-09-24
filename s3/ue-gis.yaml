@@ -1,0 +1,15 @@
+apiVersion: s3.chedaws.io/v1
+kind: Namespace
+metadata:
+  name: ue-gis
+  owner: oms-reporting
+  description: Landing area for UE GIS data delivered through GSA
+spec:
+  producer:
+    environments:
+      dev:
+        iamRoles:
+          - arn:aws:iam::381491832813:role/aws-reserved/sso.amazonaws.com/ap-southeast-2/AWSReservedSSO_chedaws-ndp-admin_c22c9dd786344207
+      test:
+        certificateSubject:
+          - "CN=COVWEDC2GSAD01.corp.chedha.net"

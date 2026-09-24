@@ -1,0 +1,11 @@
+apiVersion: s3tables.chedaws.io/v1
+kind: Namespace
+metadata:
+  name: raw_vpn_uiq
+  owner: Raw VPN UIQ ingestion stream
+  description: Raw VPN UIQ message queues
+spec:
+  environments:
+    test:
+      iamRoles:
+        - arn:aws:iam::381491832813:role/glue-msk-uiq-siq-event-streaming

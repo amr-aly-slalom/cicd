@@ -1,0 +1,154 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Table",
+  "description": "Table YAML schema v2 for s3.chedaws.io/v1 Table. metadata.namespace and metadata.name are identity fields that determine the S3 prefix and Glue catalog resources. spec.producer is optional; when present, an additional table-scoped IAM role is provisioned. spec.schema is optional; when present, a Glue database (edp_<env>_<namespace>) and table (<name>) are provisioned.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "s3.chedaws.io/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "Table"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["namespace", "name", "owner"],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Namespace identifier. Must match the parent directory name under s3/. Hyphens are normalised to underscores in the Glue database name only."
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Table/dataset identifier. Lowercase, underscores only (no hyphens). Must match the YAML file stem. Used as-is for the Glue table name, S3 prefix segment, and IAM role name segment."
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Team slug responsible for this dataset"
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the dataset"
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["format"],
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": ["csv", "json", "avro", "parquet"],
+          "description": "File format for data objects landing in this dataset's S3 prefix"
+        },
+        "producer": {
+          "type": "object",
+          "required": ["environments"],
+          "additionalProperties": false,
+          "description": "Optional. When present, provisions an additional table-scoped IAM role with s3:PutObject scoped to <namespace>/<name>/*.",
+          "properties": {
+            "environments": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": false,
+              "description": "Environments where this table-level role is active. At least one environment must be declared.",
+              "patternProperties": {
+                "^(dev|test|uat|prod)$": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "IAM identity for this table-scoped role in the named environment. Exactly one of iamRoles or certificateSubject must be present.",
+                  "properties": {
+                    "iamRoles": {
+                      "type": "array",
+                      "minItems": 1,
+                      "description": "IAM role ARNs that will assume the EDP table-scoped producer role",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^arn:aws:iam::[0-9]{12}:role/.+$"
+                      }
+                    },
+                    "certificateSubject": {
+                      "type": "array",
+                      "minItems": 1,
+                      "description": "Certificate CN values for IAM Roles Anywhere trust (on-premises producers).",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^CN=.+$"
+                      }
+                    }
+                  },
+                  "oneOf": [
+                    {
+                      "required": ["iamRoles"],
+                      "not": { "required": ["certificateSubject"] }
+                    },
+                    {
+                      "required": ["certificateSubject"],
+                      "not": { "required": ["iamRoles"] }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "schema": {
+          "type": "object",
+          "required": ["columns"],
+          "additionalProperties": false,
+          "description": "Optional schema declaration. When present, a Glue database (edp_<env>_<namespace>) and table (<name>) are provisioned.",
+          "properties": {
+            "columns": {
+              "type": "array",
+              "minItems": 1,
+              "description": "Ordered list of column definitions for the Glue table",
+              "items": {
+                "type": "object",
+                "required": ["name", "type"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_]*$",
+                    "description": "Column name. Snake_case, lowercase."
+                  },
+                  "type": {
+                    "type": "string",
+                    "pattern": "^(boolean|tinyint|smallint|int|bigint|float|double|decimal(\\(\\d+,\\s*\\d+\\))?|string|varchar(\\(\\d+\\))?|char(\\(\\d+\\))?|binary|date|timestamp|(array|map|struct|uniontype)<.+>)$",
+                    "description": "Glue-native column type. Primitives: boolean, tinyint, smallint, int, bigint, float, double, decimal[(<p>,<s>)], string, varchar[(<n>)], char[(<n>)], binary, date, timestamp. Complex: array<elem>, map<key,val>, struct<field:type,...>, uniontype<type,...>."
+                  },
+                  "comment": {
+                    "type": "string",
+                    "description": "Optional column description shown in Glue and Athena"
+                  }
+                }
+              }
+            },
+            "partitionKeys": {
+              "type": "array",
+              "uniqueItems": true,
+              "description": "Column names to use as Hive partition keys. Must be a subset of columns[].name values.",
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*$"
+              }
+            }
+          }
+        },
+        "decommission": {
+          "type": "boolean",
+          "description": "Two-phase decommission guard. Set true and merge before deleting the YAML file. When true, the table-level IAM role (if any) and Glue resources for this dataset are destroyed."
+        }
+      }
+    }
+  }
+}

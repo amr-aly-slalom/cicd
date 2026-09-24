@@ -1,0 +1,179 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TopicRegistration",
+  "description": "Producer YAML schema v3 for kafka.chedaws.io/v1 TopicRegistration. metadata.businessName and metadata.appName are identity fields; spec.events is a list of per-event topic configs using camelCase attribute names. The system assembles edp-<env>.<businessName>.<appName>.<event.name> per event per environment.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "kafka.chedaws.io/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "TopicRegistration"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["businessName", "appName", "owner"],
+      "additionalProperties": false,
+      "properties": {
+        "businessName": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Business unit identifier (e.g. ue, vpn, platform). Lowercase, hyphens allowed."
+        },
+        "appName": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Application identifier (e.g. siq, uiq, e2e). Lowercase, hyphens allowed."
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Team slug"
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["events"],
+      "additionalProperties": false,
+      "properties": {
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Non-empty list of event topic configs. One Kafka topic is created per entry per declared environment.",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "partitions",
+              "replicationFactor",
+              "retentionMs",
+              "cleanupPolicy"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "description": "Event name aligned to the source system. Lowercase, hyphens allowed, no underscores."
+              },
+              "partitions": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "replicationFactor": {
+                "type": "integer",
+                "const": 3,
+                "description": "Must equal MSK broker count (3)"
+              },
+              "retentionMs": {
+                "type": "integer",
+                "minimum": -1,
+                "maximum": 2592000000,
+                "description": "Milliseconds; -1 for infinite (discouraged); max 2,592,000,000 ms (30 days)"
+              },
+              "retentionBytes": {
+                "type": "integer",
+                "minimum": -1,
+                "description": "Default -1 (size-unlimited)"
+              },
+              "cleanupPolicy": {
+                "type": "string",
+                "enum": ["delete", "compact", "compact,delete"]
+              },
+              "maxMessageBytes": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Default 1,048,576 (1 MiB)"
+              }
+            }
+          }
+        },
+        "decommissionedEvents": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "description": "Phase-1 decommission guard: event names to be retired. Topics for these events are destroyed on next apply. Remove from this list in a follow-up PR after destroy is confirmed. MUST NOT contain any name also present in spec.events."
+        },
+        "decommission": {
+          "type": "boolean",
+          "description": "Set true to retire all events for this app (two-phase: set flag first, delete file in follow-up PR)"
+        },
+        "producer": {
+          "type": "object",
+          "required": ["environments"],
+          "additionalProperties": false,
+          "properties": {
+            "onPrem": {
+              "type": "boolean",
+              "description": "Set true for on-premises workloads using IAM Roles Anywhere"
+            },
+            "environments": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": false,
+              "patternProperties": {
+                "^(dev|test|uat|prod)$": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "iamRoles": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^arn:aws:iam::[0-9]{12}:role/.+$"
+                      }
+                    },
+                    "certificateSubject": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^CN=.+$"
+                      },
+                      "description": "Certificate CNs for IAM Roles Anywhere trust condition (one IAM role is created; all listed CNs are trusted)"
+                    },
+                    "sourceIps": {
+                      "type": "array",
+                      "minItems": 1,
+                      "description": "External CIDR blocks that require MSK security group ingress rules (e.g. on-prem or cross-VPC IPs outside the VPC CIDR).",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+                      }
+                    }
+                  },
+                  "oneOf": [
+                    {
+                      "required": ["iamRoles"],
+                      "not": {
+                        "required": ["certificateSubject"]
+                      }
+                    },
+                    {
+                      "required": ["certificateSubject"],
+                      "not": {
+                        "required": ["iamRoles"]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,46 @@
+name: Release EDP Infra
+
+# Tag pushes only. Kept separate from terraform.yaml so branch and main runs
+# don't list the uat/prod jobs (GitHub shows every job in a workflow, even
+# ones an `if:` skips).
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  # A tag can be pushed from any branch - confirms the tagged commit is
+  # actually reachable from main before uat runs, so a tag on an unmerged
+  # feature branch can't reach uat behind only a single deploy-approval click.
+  verify-tag-on-main:
+    runs-on: [ self-hosted,aws,cloud-platform,xlarge,x64 ]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Confirm ${{ github.ref_name }} is reachable from main
+        run: |
+          if ! git merge-base --is-ancestor "${{ github.sha }}" origin/main; then
+            echo "::error::Tag ${{ github.ref_name }} (${{ github.sha }}) is not on main - refusing to deploy uat."
+            exit 1
+          fi
+
+  # Doesn't need dev (that would mean waiting for all of dev's deploys to be
+  # approved on the tag run before uat could even build). No static checks:
+  # a commit on main already had them run by dev when it was pushed to main.
+  uat:
+    needs: [verify-tag-on-main]
+    uses: ./.github/workflows/tf-deploy.yaml
+    with:
+      environment: uat
+      ordered: true
+      # One approval (uat-deploy), after build, releases every stack.
+      approval: once
+
+  # prod:
+  #   needs: [verify-tag-on-main]
+  #   uses: ./.github/workflows/tf-deploy.yaml
+  #   with:
+  #     environment: prod
+  #     ordered: true
+  #     approval: once

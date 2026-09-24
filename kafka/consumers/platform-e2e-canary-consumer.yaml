@@ -1,0 +1,28 @@
+apiVersion: kafka.chedaws.io/v1
+kind: ConsumerRegistration
+metadata:
+  name: platform-e2e-canary-consumer
+  owner: platform-team
+  description: >
+    E2E synthetic canary consumer. Assumed by the canary Lambda as CanaryConsumerRole
+    to verify that the test message produced each cycle is consumable.
+spec:
+  topics:
+    - businessName: platform
+      appName: e2e
+      eventName: canary
+  consumer:
+    consumerGroupPrefix: platform-e2e-canary
+    environments:
+      dev:
+        iamRoles:
+          - arn:aws:iam::381491832813:role/chedaws-edp-kafka-canary-lambda-dev
+      test:
+        iamRoles:
+          - arn:aws:iam::381491832813:role/chedaws-edp-kafka-canary-lambda-test
+      uat:
+        iamRoles:
+          - arn:aws:iam::339712719726:role/chedaws-edp-kafka-canary-lambda-uat
+      prod:
+        iamRoles:
+          - arn:aws:iam::637423180765:role/chedaws-edp-kafka-canary-lambda-prod

@@ -1,0 +1,126 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConsumerRegistration",
+  "description": "Consumer YAML schema v2 for kafka.chedaws.io/v1 ConsumerRegistration using camelCase attribute names. Topics are referenced by businessName, appName, eventName — the full assembled name is resolved per environment by Terraform.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "kafka.chedaws.io/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "ConsumerRegistration"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "owner"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "minLength": 1,
+          "description": "Unique consumer slug (used in IAM resource names). Lowercase, hyphens allowed."
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Team slug"
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["topics", "consumer"],
+      "additionalProperties": false,
+      "properties": {
+        "topics": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "required": ["businessName", "appName", "eventName"],
+            "additionalProperties": false,
+            "properties": {
+              "businessName": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "description": "Must match metadata.businessName of a registered TopicRegistration"
+              },
+              "appName": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "description": "Must match metadata.appName of a registered TopicRegistration"
+              },
+              "eventName": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "description": "Must match an active event name of the referenced TopicRegistration"
+              }
+            }
+          },
+          "description": "Each entry must correspond to an active (non-decommissioned) TopicRegistration event"
+        },
+        "consumer": {
+          "type": "object",
+          "required": ["environments"],
+          "additionalProperties": false,
+          "properties": {
+            "consumerGroupPrefix": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Grants group IAM actions on <prefix>/* when set"
+            },
+            "onPrem": {
+              "type": "boolean",
+              "description": "Set true for on-premises workloads using IAM Roles Anywhere"
+            },
+            "environments": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": false,
+              "patternProperties": {
+                "^(dev|test|uat|prod)$": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "iamRoles": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^arn:aws:iam::[0-9]{12}:role/.+$"
+                      }
+                    },
+                    "certificateSubject": {
+                      "type": "string",
+                      "pattern": "^CN=.+$",
+                      "description": "Certificate CN for IAM Roles Anywhere trust condition"
+                    }
+                  },
+                  "oneOf": [
+                    {
+                      "required": ["iamRoles"],
+                      "not": { "required": ["certificateSubject"] }
+                    },
+                    {
+                      "required": ["certificateSubject"],
+                      "not": { "required": ["iamRoles"] }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

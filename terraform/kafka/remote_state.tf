@@ -1,0 +1,24 @@
+# The CMKs, alerts topic and platform bucket this
+# stack uses are owned by the core state - read them here instead of
+# re-declaring them, which would collide with core's copies.
+data "terraform_remote_state" "core" {
+  backend = "s3"
+  config = {
+    bucket = "chedaws-prod-terraform-state-file"
+    key    = "chedaws-data-platform/chedaws-tf-edp-infra/terraform-state-2026-06/terraform.tfstate"
+    region = "ap-southeast-2"
+  }
+  workspace = local.environment
+}
+
+# The S3 on-prem producer roles are owned by the s3 state (terraform/s3/) -
+# read them from there.
+data "terraform_remote_state" "s3" {
+  backend = "s3"
+  config = {
+    bucket = "chedaws-prod-terraform-state-file"
+    key    = "chedaws-data-platform/chedaws-tf-edp-infra/terraform-state-2026-06/s3/terraform.tfstate"
+    region = "ap-southeast-2"
+  }
+  workspace = local.environment
+}

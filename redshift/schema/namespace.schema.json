@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Redshift Namespace definition",
+  "description": "Schema for a single namespace definition file at redshift/namespaces/<name>.yaml. One file describes exactly one Redshift schema, provisioned for the MWAA namespace of the same name. metadata.name must match an existing, non-decommissioned airflow/mwaa/<name>.yaml - this registers Redshift access for an MWAA namespace, it does not define a standalone namespace concept of its own.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "redshift.chedaws.io/v1",
+      "description": "Always the literal string \"redshift.chedaws.io/v1\"."
+    },
+    "kind": {
+      "type": "string",
+      "const": "Namespace",
+      "description": "Always the literal string \"Namespace\"."
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "MWAA namespace this registers Redshift access for - must match metadata.name of an existing, non-decommissioned airflow/mwaa/<name>.yaml. Also becomes the Redshift schema name and the suffix of the generated DB user (<name>_mwaa) and group (<name>_group).",
+          "pattern": "^[a-z][a-z0-9_]{0,254}$",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "owner": {
+          "type": "string",
+          "description": "Team or individual responsible for this namespace's Redshift access. Informational only - not consumed by Terraform.",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of what this namespace's Redshift schema is for. Informational only - not consumed by Terraform.",
+          "minLength": 1
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "decommission": {
+          "type": "boolean",
+          "description": "Set true before deleting this file - the CI decommission guard rejects deletion of a namespace file whose last committed content did not have this set, mirroring the same two-phase process used for Kafka topics and MWAA namespaces."
+        },
+        "additional_schemas": {
+          "$ref": "#/definitions/perEnvironmentNames",
+          "description": "Per environment, other already-existing Redshift schemas this namespace's group should get read-only access to (USAGE on the schema, SELECT on its tables), in addition to its own <name> schema. These schemas are not created or owned here - they must already exist in that environment (e.g. populated by GoldenGate CDC replication) - Terraform errors clearly if one doesn't. Omit an environment to grant nothing there."
+        },
+        "writable_schemas": {
+          "$ref": "#/definitions/perEnvironmentNames",
+          "description": "Per environment, other already-existing Redshift schemas this namespace's group should get read-write access to (USAGE and CREATE on the schema, SELECT/INSERT/UPDATE/DELETE/TRUNCATE on its tables) - the read-write counterpart to additional_schemas. Use when a namespace must write into a schema another principal owns. Like additional_schemas these must already exist and are never created or owned here. Unlike additional_schemas, ALTER DEFAULT PRIVILEGES is also set for the schema's owner, so tables that owner creates later stay accessible without a re-apply. Omit an environment to grant nothing there."
+        },
+        "writable_databases": {
+          "$ref": "#/definitions/perEnvironmentNames",
+          "description": "Per environment, databases in which this namespace's group should be able to create its own schemas (CREATE ON DATABASE). Use for namespaces whose dbt projects create schemas whose names are not known at apply time - the namespace owns each schema it creates, so it needs no further grant inside it, and still gets nothing on schemas other teams own. Each database must already exist in that environment; this only grants, it never creates one. Omit an environment to grant nothing there."
+        }
+      }
+    }
+  },
+  "definitions": {
+    "perEnvironmentNames": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^(dev|test|uat|prod)$": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

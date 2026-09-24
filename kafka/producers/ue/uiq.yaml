@@ -1,0 +1,23 @@
+apiVersion: kafka.chedaws.io/v1
+kind: TopicRegistration
+metadata:
+  businessName: ue
+  appName: uiq
+  owner: ue-uiq-team
+spec:
+  events:
+    - name: ssnevent
+      partitions: 6
+      replicationFactor: 3
+      retentionMs: 604800000
+      cleanupPolicy: delete
+    - name: export
+      partitions: 6
+      replicationFactor: 3
+      retentionMs: 604800000
+      cleanupPolicy: delete
+    - name: odr
+      partitions: 6
+      replicationFactor: 3
+      retentionMs: 604800000
+      cleanupPolicy: delete

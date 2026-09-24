@@ -1,0 +1,21 @@
+apiVersion: s3.chedaws.io/v1
+kind: Namespace
+metadata:
+  name: platform
+  owner: platform-team
+  description: Platform engineering canary domain for EDP S3 producer smoke tests
+spec:
+  producer:
+    environments:
+      dev:
+        iamRoles:
+          - arn:aws:iam::381491832813:role/chedaws-edp-s3-e2e-verifier-dev
+      test:
+        iamRoles:
+          - arn:aws:iam::381491832813:role/chedaws-edp-s3-e2e-verifier-test
+      uat:
+        iamRoles:
+          - arn:aws:iam::339712719726:role/chedaws-edp-s3-e2e-verifier-uat
+      prod:
+        iamRoles:
+          - arn:aws:iam::637423180765:role/chedaws-edp-s3-e2e-verifier-prod

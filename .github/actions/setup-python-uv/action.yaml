@@ -1,0 +1,32 @@
+name: Set up Python and uv
+description: >-
+  Bootstraps pip, installs uv at a pinned version, then creates a virtualenv
+  using the Python version declared in the repo's .python-version file.
+  Adds the venv's bin directory to GITHUB_PATH so subsequent steps can call
+  python3 and uv directly without activating the venv.
+
+inputs:
+  uv-version:
+    description: "uv version to install via pip (e.g. 0.11.25)."
+    required: false
+    default: "0.11.25"
+
+runs:
+  using: composite
+  steps:
+    - name: Install pip
+      shell: bash
+      run: python3 -m ensurepip --upgrade
+
+    - name: Install uv
+      shell: bash
+      run: python3 -m pip install uv==${{ inputs.uv-version }}
+
+    - name: Install Python from .python-version and create venv
+      shell: bash
+      run: |
+        python_version="$(cat .python-version)"
+        venv_dir="$RUNNER_TEMP/ci-py${python_version//./}"
+        uv venv --python "${python_version}" "${venv_dir}"
+        "${venv_dir}/bin/python3" -m ensurepip --upgrade
+        echo "${venv_dir}/bin" >> "$GITHUB_PATH"

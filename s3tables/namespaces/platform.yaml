@@ -1,0 +1,20 @@
+apiVersion: s3tables.chedaws.io/v1
+kind: Namespace
+metadata:
+  name: platform
+  owner: platform-team
+  description: Platform engineering canary namespace for EDP S3 Tables smoke tests
+spec:
+  environments:
+    dev:
+      iamRoles:
+        - arn:aws:iam::381491832813:role/chedaws-edp-s3tables-e2e-verifier-dev
+    test:
+      iamRoles:
+        - arn:aws:iam::381491832813:role/chedaws-edp-s3tables-e2e-verifier-test
+    uat:
+      iamRoles:
+        - arn:aws:iam::339712719726:role/chedaws-edp-s3tables-e2e-verifier-uat
+    prod:
+      iamRoles:
+        - arn:aws:iam::637423180765:role/chedaws-edp-s3tables-e2e-verifier-prod

@@ -1,0 +1,12 @@
+apiVersion: s3.chedaws.io/v1
+kind: Namespace
+metadata:
+  name: sap-bw-oms-hist
+  owner: ADMS Team
+  description: Landing area for historical extracts coming from SAP BW for OMS
+spec:
+  producer:
+    environments:
+      test:
+        certificateSubject:
+          - "CN=sapbwd_BWD_43"

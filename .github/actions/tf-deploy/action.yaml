@@ -1,0 +1,66 @@
+name: Terraform deploy
+description: >-
+  Applies the plan tf-deploy.yaml's build job saved for one stack in one
+  environment - provider cache, init, workspace select, download the plan from
+  S3, apply. The job using it supplies checkout, the runner, the environment
+  (its approval gate) and the timeout.
+
+inputs:
+  stack:
+    description: "core, or the stack's directory under terraform/ (redshift, s3tables, s3, rds, kafka, mwaa, lakeformation)"
+    required: true
+  environment:
+    description: "Terraform workspace to apply to (dev, test, uat, prod)"
+    required: true
+  plan-s3-path:
+    description: "bucket/key of the saved plan, from the build job's uploaded_url_<stack> output"
+    required: true
+  setup-python:
+    description: "Set up Python and uv first, for stacks whose apply runs Python (mwaa's S3 bootstrap)"
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Terraform
+      uses: networkanalytics-actions/hashicorp-setup-terraform@v3
+
+    # One shared provider cache for every root module's init. On Linux,
+    # terraform init symlinks .terraform/providers/... into this directory
+    # instead of unpacking its own copy - the aws provider alone is ~700MB, and
+    # the build job inits every stack, which is what filled the runner's disk.
+    # RUNNER_TOOL_CACHE persists between jobs on self-hosted runners, so later
+    # runs skip the download entirely.
+    #
+    # A cached provider is only used if the module's .terraform.lock.hcl has an
+    # h1: checksum for this platform (linux_amd64); otherwise init quietly
+    # downloads it again. When updating a lock file on another OS, run
+    # `terraform providers lock -platform=linux_amd64` so CI keeps hitting the
+    # cache.
+    - name: Configure Terraform provider cache
+      shell: bash
+      run: |
+        cache_dir="${RUNNER_TOOL_CACHE:-$HOME/.cache}/terraform-plugin-cache"
+        mkdir -p "$cache_dir"
+        echo "TF_PLUGIN_CACHE_DIR=$cache_dir" >> "$GITHUB_ENV"
+
+    - name: Set up Python and uv
+      if: inputs.setup-python == 'true'
+      uses: ./.github/actions/setup-python-uv
+
+    - name: Terraform Init
+      shell: bash
+      working-directory: ${{ inputs.stack == 'core' && './terraform' || format('./terraform/{0}', inputs.stack) }}
+      run: terraform init
+
+    - name: Terraform Apply
+      shell: bash
+      working-directory: ${{ inputs.stack == 'core' && './terraform' || format('./terraform/{0}', inputs.stack) }}
+      env:
+        WORKSPACE: ${{ inputs.environment }}
+        PLAN_S3_PATH: ${{ inputs.plan-s3-path }}
+      run: |
+        terraform workspace select -or-create "$WORKSPACE"
+        aws s3 cp "s3://$PLAN_S3_PATH" tfapply
+        terraform apply -input=false -lock-timeout=10m -parallelism=20 tfapply

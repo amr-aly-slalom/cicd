@@ -1,0 +1,11 @@
+apiVersion: s3tables.chedaws.io/v1
+kind: Namespace
+metadata:
+  name: raw_ue_siq
+  owner: Raw UE SIQ ingestion stream
+  description: Raw UE SIQ message queues
+spec:
+  environments:
+    test:
+      iamRoles:
+        - arn:aws:iam::381491832813:role/glue-msk-uiq-siq-event-streaming

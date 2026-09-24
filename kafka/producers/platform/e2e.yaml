@@ -1,0 +1,30 @@
+apiVersion: kafka.chedaws.io/v1
+kind: TopicRegistration
+metadata:
+  businessName: platform
+  appName: e2e
+  owner: platform-team
+  description: >
+    E2E synthetic canary topic. Produces one test message per cycle; consumed
+    by the canary Lambda to verify end-to-end MSK cluster health.
+spec:
+  events:
+    - name: canary
+      partitions: 1
+      replicationFactor: 3
+      retentionMs: 3600000
+      cleanupPolicy: delete
+  producer:
+    environments:
+      dev:
+        iamRoles:
+          - arn:aws:iam::381491832813:role/chedaws-edp-kafka-canary-lambda-dev
+      test:
+        iamRoles:
+          - arn:aws:iam::381491832813:role/chedaws-edp-kafka-canary-lambda-test
+      uat:
+        iamRoles:
+          - arn:aws:iam::339712719726:role/chedaws-edp-kafka-canary-lambda-uat
+      prod:
+        iamRoles:
+          - arn:aws:iam::637423180765:role/chedaws-edp-kafka-canary-lambda-prod

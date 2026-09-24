@@ -1,0 +1,29 @@
+name: Post-Deploy Tests
+
+# Manual, ad-hoc runs against a deployed environment. In the pipeline the same
+# tests run as tf-deploy.yaml's post-deploy-tests job; both use
+# .github/actions/post-deploy-tests, which documents the auth model.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (dev, test, uat, prod)"
+        required: true
+        type: choice
+        options: [dev, test, uat, prod]
+
+jobs:
+  post-deploy-tests:
+    name: "${{ inputs.environment }}-post-deploy-tests"
+    runs-on: [self-hosted, aws, cloud-platform, xlarge, x64]
+    environment: "${{ inputs.environment }}-post-deploy-tests"
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run post-deploy tests
+        uses: ./.github/actions/post-deploy-tests
+        with:
+          environment: ${{ inputs.environment }}

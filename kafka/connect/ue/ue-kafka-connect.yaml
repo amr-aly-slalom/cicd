@@ -1,0 +1,23 @@
+apiVersion: kafka.chedaws.io/v1
+kind: KafkaConnectRegistration
+metadata:
+  name: ue-kafka-connect
+  owner: ue-platform-team
+  description: >
+    Confluent Kafka Connect server for UE business unit.
+    Aggregates ue/siq and ue/uiq producer groups.
+spec:
+  variant: confluent
+  sources:
+    - businessName: ue
+      appName: siq
+    - businessName: ue
+      appName: uiq
+  connect:
+    onPrem: true
+    environments:
+      uat:
+        certificateSubject:
+          - "CN=IOVLUDC2KAFU1"
+        sourceIps:
+          - "10.153.57.61/32"

@@ -1,0 +1,18 @@
+redshift_smoke_test:
+  target: dev
+  outputs:
+    dev:
+      type: redshift
+      method: database
+      # Set by DbtOperator's env_vars=redshift_auth_vars before dbt runs.
+      # dbname must match the database those credentials were issued for -
+      # env_vars=redshift_auth_vars(db="edp_raw_dev") for anything but edp.
+      host: "{{ env_var('DBT_REDSHIFT_HOST') }}"
+      port: "{{ env_var('DBT_REDSHIFT_PORT') | as_number }}"
+      user: "{{ env_var('DBT_REDSHIFT_USER') }}"
+      password: "{{ env_var('DBT_REDSHIFT_PASSWORD') }}"
+      dbname: "{{ env_var('DBT_REDSHIFT_DBNAME') }}"
+      # The schema provisioned for the platform namespace - see
+      # redshift/namespaces/platform.yaml and terraform/redshift_namespaces.tf.
+      schema: platform
+      threads: 1

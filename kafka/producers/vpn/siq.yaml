@@ -1,0 +1,18 @@
+apiVersion: kafka.chedaws.io/v1
+kind: TopicRegistration
+metadata:
+  businessName: vpn
+  appName: siq
+  owner: vpn-siq-team
+spec:
+  events:
+    - name: hf-read-results
+      partitions: 12
+      replicationFactor: 3
+      retentionMs: 604800000
+      cleanupPolicy: delete
+    - name: voltage-threshold-trap
+      partitions: 6
+      replicationFactor: 3
+      retentionMs: 604800000
+      cleanupPolicy: delete

@@ -1,0 +1,20 @@
+apiVersion: s3.chedaws.io/v1
+kind: Table
+metadata:
+  namespace: platform
+  name: e2e_json
+  owner: platform-team
+  description: E2E canary table for JSON format validation
+spec:
+  format: json
+  schema:
+    columns:
+      - name: id
+        type: int
+        comment: "Stable sort and filter key for E2E validation"
+      - name: name
+        type: string
+      - name: value
+        type: double
+      - name: active
+        type: boolean

@@ -1,0 +1,195 @@
+name: Publish MWAA artefact
+description: >-
+  Sync a local directory (DAGs, a dbt project, anything else that belongs
+  under your namespace) to s3://<mwaa bucket>/dags/<namespace>/, without
+  needing to know the platform account IDs, IAM role-naming convention, or
+  bucket name.
+
+# Auth-agnostic by design: run whatever credential-setup steps work for you
+# (self-hosted runner with an instance profile already scoped as a ci_roles
+# principal, your own OIDC assume-role step, static keys - anything) BEFORE
+# this step, in the same job. This step only does the second hop: assume the
+# namespace-scoped CI role, then sync. It never establishes your initial AWS
+# identity itself.
+#
+# On this GHE Server instance, AssumeRoleWithWebIdentity requires AWS STS to
+# fetch your OIDC issuer's JWKS over the network - that only works if this
+# instance's OIDC endpoint is reachable from AWS, which most locked-down
+# on-prem instances aren't. That's why this action doesn't do OIDC for you;
+# it's why the platform's own deploy jobs don't use it either
+# (self-hosted runners with instance-profile credentials instead).
+#
+# Usage, after your own credential-setup step(s):
+#
+#   - uses: <org>/chedaws-tf-edp-infra/.github/actions/publish-mwaa-artefact@main
+#     with:
+#       environment: dev
+#       namespace: finance
+#       source_dir: dags
+#
+# Your identity at the point this step runs must already be (or be able to
+# assume) a principal listed under spec.ci_roles[environment] in your
+# airflow/mwaa/<namespace>.yaml manifest - see
+# specs/009-mwaa-airflow-platform/contracts/namespace-manifest.md.
+
+inputs:
+  environment:
+    description: "Target MWAA environment: dev, test, uat, or prod."
+    required: true
+  namespace:
+    description: "Your registered MWAA namespace (airflow/mwaa/<namespace>.yaml)."
+    required: true
+  source_dir:
+    description: "Local directory (in your repo) to sync to s3://<mwaa bucket>/dags/<namespace>/."
+    required: true
+  target_dir:
+    description: >-
+      Optional subdirectory under s3://<mwaa bucket>/dags/<namespace>/ to sync
+      source_dir into instead of the namespace root - e.g. a dbt project or a
+      nested DAG folder. Relative only: no leading "/" and no ".." segment,
+      since either would let this namespace's role write outside its own
+      dags/<namespace>/ prefix.
+    required: false
+    default: ""
+  delete_removed:
+    description: "Remove files under the namespace's S3 prefix that no longer exist in source_dir."
+    required: false
+    default: "false"
+
+outputs:
+  error_message:
+    description: "Set when the action fails: the diagnostic message explaining why (see the run logs for the same text)."
+    value: ${{ steps.publish.outputs.error_message }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        case "${{ inputs.environment }}" in
+          dev|test|uat|prod) ;;
+          *)
+            echo "ERROR: environment [${{ inputs.environment }}] is not one of dev, test, uat, prod."
+            exit 1
+            ;;
+        esac
+        if [ ! -d "${{ inputs.source_dir }}" ]; then
+          echo "ERROR: source_dir [${{ inputs.source_dir }}] does not exist in the checked-out repo."
+          exit 1
+        fi
+
+        target_dir="${{ inputs.target_dir }}"
+        if [ -n "$target_dir" ]; then
+          case "$target_dir" in
+            /*)
+              echo "ERROR: target_dir [$target_dir] must be relative - it may not start with '/'."
+              exit 1
+              ;;
+          esac
+          IFS='/' read -ra segments <<<"$target_dir"
+          for segment in "${segments[@]}"; do
+            if [ "$segment" = ".." ]; then
+              echo "ERROR: target_dir [$target_dir] must not contain a '..' segment - it would let this namespace's role write outside its own dags/${{ inputs.namespace }}/ prefix."
+              exit 1
+            fi
+          done
+        fi
+
+    - name: Resolve platform account ID
+      id: account
+      shell: bash
+      run: |
+        case "${{ inputs.environment }}" in
+          dev|test) id=381491832813 ;;
+          uat)      id=339712719726 ;;
+          prod)     id=637423180765 ;;
+        esac
+        echo "id=$id" >> "$GITHUB_OUTPUT"
+
+    # Assume and sync in ONE step (export, not $GITHUB_ENV) rather than two:
+    # the assumed credentials from a separate "assume" step did not
+    # reliably reach a later "sync" step's runtime on this org's runners,
+    # which meant the sync silently ran as the caller's own identity
+    # instead of the namespace-scoped CI role. One shell process makes that
+    # ordering unambiguous. Manual assume-role (not
+    # aws-actions/configure-aws-credentials) so a denied AssumeRole can be
+    # caught here and turned into the ci_roles hint below, rather than just
+    # failing as an opaque marketplace-action error. Same pattern
+    # terraform/mwaa/scripts/mwaa_s3_bootstrap.sh uses.
+    - name: Assume namespace CI role and sync
+      id: publish
+      shell: bash
+      env:
+        # A denied AssumeRole is almost never "the role exists and you're
+        # just not in ci_roles" - AWS returns the same AccessDenied whether
+        # the role doesn't exist at all (namespace never registered/applied)
+        # or it exists but doesn't trust you, so the hint has to cover both.
+        ASSUME_FAILURE_HINT: >-
+          AWS returns the same AccessDenied whether the role doesn't exist
+          yet - is the [${{ inputs.namespace }}] namespace registered
+          (airflow/mwaa/${{ inputs.namespace }}.yaml) and applied via
+          Terraform? - or it exists but this identity genuinely isn't
+          allowed to assume it. Check `ci_roles` for the
+          [${{ inputs.environment }}] environment in
+          [https://github.domain.prd.int/chedaws-data-platform/chedaws-tf-edp-infra/tree/main/airflow/mwaa].
+          See
+          [https://github.domain.prd.int/chedaws-data-platform/chedaws-tf-edp-infra/blob/main/airflow/README.md]
+          for details.
+        # Unlike a failed assume, reaching sync at all means the role exists
+        # and trusts us - a `ci_roles` fix won't help here.
+        SYNC_FAILURE_HINT: >-
+          The role was assumed successfully, so this is most likely an S3 or
+          KMS permissions issue on the role itself, not a missing `ci_roles`
+          entry. See
+          [https://github.domain.prd.int/chedaws-data-platform/chedaws-tf-edp-infra/blob/main/airflow/README.md]
+          for how DAG uploads are scoped, or contact the platform team.
+      run: |
+        role_arn="arn:aws:iam::${{ steps.account.outputs.id }}:role/edp-${{ inputs.environment }}-mwaa-ns-${{ inputs.namespace }}-ci"
+        current_role="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null || echo unknown)"
+        echo "Assuming role [$role_arn]..."
+        if ! creds="$(aws sts assume-role \
+          --role-arn "$role_arn" \
+          --role-session-name "mwaa-artefact-publish-${{ inputs.namespace }}" \
+          --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+          --output text 2>&1)"; then
+          msg="ERROR: Attempted to upload object using [$current_role], but received error [$creds]. $ASSUME_FAILURE_HINT"
+          echo "$msg"
+          echo "error_message<<CHED_EOM" >> "$GITHUB_OUTPUT"
+          echo "$msg" >> "$GITHUB_OUTPUT"
+          echo "CHED_EOM" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+        echo "Role [$role_arn] assumed."
+        export AWS_ACCESS_KEY_ID=$(echo "$creds" | awk '{print $1}')
+        export AWS_SECRET_ACCESS_KEY=$(echo "$creds" | awk '{print $2}')
+        export AWS_SESSION_TOKEN=$(echo "$creds" | awk '{print $3}')
+
+        bucket="chedaws-edp-mwaa-${{ inputs.environment }}-${{ steps.account.outputs.id }}-ap-southeast-2"
+        target_dir="${{ inputs.target_dir }}"
+        target_dir="${target_dir%/}"
+        if [ -n "$target_dir" ]; then
+          dest="s3://${bucket}/dags/${{ inputs.namespace }}/${target_dir}/"
+        else
+          dest="s3://${bucket}/dags/${{ inputs.namespace }}/"
+        fi
+        echo "Syncing [${{ inputs.source_dir }}] to [$dest]..."
+        # The bucket policy denies PutObject outright unless the request
+        # sets SSE-KMS with this specific key (terraform/mwaa/s3_policy.tf) -
+        # an explicit deny, so it overrides the -ci role's own Allow
+        # regardless of IAM permissions.
+        sse_args=(--sse aws:kms --sse-kms-key-id "alias/chedaws-edp-s3-${{ inputs.environment }}")
+        if [ "${{ inputs.delete_removed }}" = "true" ]; then
+          upload_cmd=(aws s3 sync "${{ inputs.source_dir }}" "$dest" --delete "${sse_args[@]}")
+        else
+          upload_cmd=(aws s3 cp "${{ inputs.source_dir }}" "$dest" --recursive "${sse_args[@]}")
+        fi
+        if ! err="$("${upload_cmd[@]}" 2>&1)"; then
+          msg="ERROR: Attempted to upload object using [$role_arn], but received error [$err]. $SYNC_FAILURE_HINT"
+          echo "$msg"
+          echo "error_message<<CHED_EOM" >> "$GITHUB_OUTPUT"
+          echo "$msg" >> "$GITHUB_OUTPUT"
+          echo "CHED_EOM" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+        echo "Synced [${{ inputs.source_dir }}] to [$dest]."

@@ -1,0 +1,12 @@
+apiVersion: redshift.chedaws.io/v1
+kind: Namespace
+metadata:
+  name: platform
+  owner: platform-team
+  description: Platform team's Redshift schema
+spec:
+  # For the platform team's own credential-binding test - see
+  # airflow/dags/platform/e2e_redshift_dbname_binding.py.
+  writable_databases:
+    dev:
+      - edp_raw_dev

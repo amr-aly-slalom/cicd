@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "KafkaConnectRegistration",
+  "description": "Connect server YAML schema v1 for kafka.chedaws.io/v1 KafkaConnectRegistration. Registers a named Kafka Connect distributed-mode cluster against the MSK cluster, aggregating one or more TopicRegistration source groups into a single IAM role. Provisions prefixed system topics (<name>-connect-config, <name>-connect-offsets, <name>-connect-status, and optionally <name>-confluent-license) isolated to this registration.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "kafka.chedaws.io/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "KafkaConnectRegistration"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "owner"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Unique connect server slug. Used verbatim in IAM role names (edp-<env>-kafka-connect-<name>) and system topic names (<name>-connect-config etc.). Lowercase, hyphens allowed."
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Team slug"
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["sources", "connect"],
+      "additionalProperties": false,
+      "properties": {
+        "variant": {
+          "type": "string",
+          "enum": ["standard", "confluent"],
+          "description": "Kafka Connect distribution variant. 'confluent' provisions an additional <name>-confluent-license system topic and grants IAM access to it. Absent or 'standard' = Apache Kafka Connect (no confluent-license topic)."
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "description": "TopicRegistration groups this connect server produces for. Each entry must resolve to an existing TopicRegistration YAML file. The IAM role created for this registration will have produce access on all events from all listed sources.",
+          "items": {
+            "type": "object",
+            "required": ["businessName", "appName"],
+            "additionalProperties": false,
+            "properties": {
+              "businessName": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "description": "Must match metadata.businessName of a registered TopicRegistration"
+              },
+              "appName": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "description": "Must match metadata.appName of a registered TopicRegistration"
+              }
+            }
+          }
+        },
+        "connect": {
+          "type": "object",
+          "required": ["environments"],
+          "additionalProperties": false,
+          "properties": {
+            "onPrem": {
+              "type": "boolean",
+              "description": "Set true for on-premises Kafka Connect servers using IAM Roles Anywhere. When true, environments must use certificateSubject (not iamRoles)."
+            },
+            "environments": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": false,
+              "patternProperties": {
+                "^(dev|test|uat|prod)$": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "iamRoles": {
+                      "type": "array",
+                      "minItems": 1,
+                      "description": "AWS IAM role ARNs for cloud-based connect workers to assume this role",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^arn:aws:iam::[0-9]{12}:role/.+$"
+                      }
+                    },
+                    "certificateSubject": {
+                      "type": "array",
+                      "minItems": 1,
+                      "description": "Certificate CNs for IAM Roles Anywhere trust condition. One IAM role is created; all listed CNs are trusted. Use for on-prem connect servers.",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^CN=.+$"
+                      }
+                    },
+                    "sourceIps": {
+                      "type": "array",
+                      "minItems": 1,
+                      "description": "External CIDR blocks that require MSK security group ingress rules (e.g. on-prem or cross-VPC IPs outside the VPC CIDR).",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+                      }
+                    }
+                  },
+                  "oneOf": [
+                    {
+                      "required": ["iamRoles"],
+                      "not": { "required": ["certificateSubject"] }
+                    },
+                    {
+                      "required": ["certificateSubject"],
+                      "not": { "required": ["iamRoles"] }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

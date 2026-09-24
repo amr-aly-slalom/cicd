@@ -1,0 +1,67 @@
+# Development environment and tool config for this repo's Python.
+#
+# This file (plus uv.lock) is the single pinned source of truth for the
+# *development* environment - what CI and your editor run lint, typecheck and
+# tests in. Set it up with `uv sync`, or `make setup`.
+#
+# It is deliberately NOT the source of truth for what gets deployed. Those
+# ship independently and each keep their own pins:
+#   - lambda/*/requirements.txt      -> zipped into each Lambda at deploy time
+#   - airflow/requirements.txt       -> installed into the MWAA environment
+#   - airflow/dags/edp_dbt/requirements.txt -> the dbt venv, pre-built at
+#     `terraform apply` time and synced via dags/ (see that dir's README)
+
+[project]
+name = "chedaws-tf-edp-infra"
+version = "0.0.0"
+description = "EDP infrastructure - Python tooling, plugins, and Lambda handlers"
+requires-python = "==3.12.*"
+# Nothing here is published or installed as a package; see tool.uv.package.
+dependencies = []
+
+[tool.uv]
+# Virtual project: uv manages a .venv for the repo without trying to build
+# and install the repo itself as a distribution.
+package = false
+
+[dependency-groups]
+dev = [
+    # Airflow, matching aws_mwaa_environment.airflow's airflow_version in
+    # terraform/mwaa.tf. edp_dbt and airflow/dags/ are written against this.
+    "apache-airflow==3.2.1",
+    "apache-airflow-providers-standard==1.12.3",
+    "apache-airflow-providers-amazon==9.25.0",
+    # So the editor can resolve imports in lambda/*/handler.py. These mirror
+    # the lambda/*/requirements.txt ranges; those files remain what actually
+    # ships, so keep the two roughly in step when bumping either.
+    "kafka-python-ng==2.2.3",
+    "aws-msk-iam-sasl-signer-python==1.0.2",
+    "boto3==1.43.83",
+    "fastavro==1.9.7",
+    "pyarrow==19.0.1",
+    # .github/scripts/*.py
+    "pyyaml==6.0.3",
+    "check-jsonschema==0.38.0",
+    # Tooling
+    "pytest==9.1.1",
+    "ruff==0.16.5",
+    # ty: Astral's Rust-based typechecker, replacing mypy. Still 0.0.x/beta,
+    # no stable API yet - kept non-blocking in CI pending review of its
+    # diagnostics (see tf-deploy.yaml's Typecheck step).
+    "ty==0.0.83",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 95
+
+[tool.ruff.lint]
+# E/F: pycodestyle+pyflakes baseline. I: import sorting. UP: modern-Python
+# idioms. B: flake8-bugbear (common real bugs). S/BLE: flake8-bandit/
+# blind-except (security, catching bare Exception). RUF: ruff's own checks.
+select = ["E", "F", "I", "UP", "B", "S", "BLE", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# S101 (use of assert) is how pytest assertions work; flagging it everywhere
+# a test file uses assert would be flagging the entire suite.
+"**/tests/*.py" = ["S101"]

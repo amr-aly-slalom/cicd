@@ -1,0 +1,24 @@
+apiVersion: mwaa.chedaws.io/v1
+kind: Namespace
+metadata:
+  name: platform
+  owner: platform-team
+  description: Platform team end-to-end testing namespace
+
+spec:
+  fargate_enabled: true
+
+  sso_roles:
+    dev:  chedaws-ndp-admin
+    test: chedaws-ndp-admin
+    uat:  chedaws-ndp-admin
+    prod: chedaws-ndp-admin
+
+  ci_roles:
+    dev:
+      - arn:aws:iam::381491832813:role/chedaws-edp-ci-runner
+    test:
+      - arn:aws:iam::381491832813:role/chedaws-edp-ci-runner
+
+  secrets:
+    - example_secret

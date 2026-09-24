@@ -1,0 +1,9 @@
+apiVersion: s3.chedaws.io/v1
+kind: Table
+metadata:
+  namespace: sap-bw-oms-hist
+  name: zoms_c02
+  owner: ADMS Team
+  description: ZOMS_C02 SAP BW OMS Infocube extract
+spec:
+  format: csv

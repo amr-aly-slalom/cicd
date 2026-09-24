@@ -1,0 +1,140 @@
+{
+  "title": "DatabaseAccess / TableAccess",
+  "description": "Named database or table grants for S3 Tables or Redshift, driven by lakeformation/database_table_access/*.yaml",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "enum": [
+        "s3tables.lakeformation.chedaws.io/v1",
+        "redshift.lakeformation.chedaws.io/v1"
+      ],
+      "description": "Selects the target service: s3tables or redshift."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["DatabaseAccess", "TableAccess"]
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["catalogName", "databaseName", "environments", "owner", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "catalogName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "S3 Tables: the table bucket name. Redshift: the Redshift database name. Required for both services."
+        },
+        "databaseName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "S3 Tables: the namespace. Redshift: the schema."
+        },
+        "tableName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required only when kind is TableAccess."
+        },
+        "environments": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Single environment name this file applies to (one file per environment)."
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/groupGrant" }
+        },
+        "iamRoles": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/iamRoleGrant" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "groupGrant": {
+      "type": "object",
+      "required": ["name", "grants"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "AD / IdC group DisplayName."
+        },
+        "grants": { "$ref": "#/definitions/grantsList" }
+      }
+    },
+    "iamRoleGrant": {
+      "type": "object",
+      "required": ["arn", "grants"],
+      "additionalProperties": false,
+      "properties": {
+        "arn": {
+          "type": "string",
+          "pattern": "^arn:aws:iam::\\d{12}:role/.+$"
+        },
+        "grants": { "$ref": "#/definitions/grantsList" }
+      }
+    },
+    "grantsList": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "CREATE_TABLE",
+          "ALTER",
+          "DROP",
+          "DESCRIBE",
+          "SELECT",
+          "INSERT",
+          "DELETE",
+          "ALL"
+        ]
+      },
+      "uniqueItems": true
+    }
+  },
+  "allOf": [
+    {
+      "comment": "TableAccess files must include metadata.tableName; DatabaseAccess files must not.",
+      "if": {
+        "properties": { "kind": { "const": "TableAccess" } }
+      },
+      "then": {
+        "properties": {
+          "metadata": {
+            "required": ["tableName"]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "metadata": {
+            "not": { "required": ["tableName"] }
+          }
+        }
+      }
+    }
+  ]
+}

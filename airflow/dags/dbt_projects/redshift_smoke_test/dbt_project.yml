@@ -1,0 +1,20 @@
+name: redshift_smoke_test
+version: "1.0.0"
+config-version: 2
+
+profile: redshift_smoke_test
+
+model-paths: ["models"]
+test-paths: ["tests"]
+
+models:
+  redshift_smoke_test:
+    +materialized: table
+
+# Runs after models AND tests, regardless of whether they passed - dbt hooks
+# defined this way execute even on failure, unlike a model post-hook (which
+# would run right after that model's own CREATE, before tests get a chance
+# to query it). Drops the table so the smoke test leaves nothing behind in
+# the namespace's schema, whether it passed or failed.
+on-run-end:
+  - "drop table if exists {{ target.schema }}.example_data"

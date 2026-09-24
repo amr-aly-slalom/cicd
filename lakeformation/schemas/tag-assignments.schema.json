@@ -1,0 +1,78 @@
+{
+  "title": "TagAssignments",
+  "description": "Attaches LF-Tags to a database or table, driven by lakeformation/tag_assignments/*.yaml",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "tags.lakeformation.chedaws.io/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "TagAssignments"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["service", "catalogName", "databaseName", "environments", "owner", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "service": {
+          "type": "string",
+          "enum": ["s3tables", "redshift"],
+          "description": "Selects which federated catalog catalogName resolves against."
+        },
+        "catalogName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "s3tables: the table bucket name. redshift: the Redshift database name."
+        },
+        "databaseName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "s3tables: the namespace. redshift: the schema."
+        },
+        "tableName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional. When present, the tags are assigned to this table instead of the database."
+        },
+        "environments": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Single environment name this file applies to (one file per environment)."
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["tags"],
+      "additionalProperties": false,
+      "properties": {
+        "tags": {
+          "type": "array",
+          "minItems": 1,
+          "description": "One or more {key, value} pairs to assign. Each key/value must be defined in lakeformation/lf_tags/*.yaml.",
+          "items": {
+            "type": "object",
+            "required": ["key", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "key": { "type": "string", "minLength": 1 },
+              "value": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

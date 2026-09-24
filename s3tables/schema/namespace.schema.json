@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "S3 Tables Namespace definition",
+  "description": "Schema for a single namespace definition file at s3tables/namespaces/<name>.yaml. One file describes exactly one namespace. The file name has no functional meaning - identity comes from metadata.name - but keeping them aligned is recommended.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "s3tables.chedaws.io/v1",
+      "description": "Always the literal string \"s3tables.chedaws.io/v1\"."
+    },
+    "kind": {
+      "type": "string",
+      "const": "Namespace",
+      "description": "Always the literal string \"Namespace\"."
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Namespace name. This is the field that identifies the namespace - not the file name or file location. The actual AWS namespace name may be prefixed as edp_<environment>_<namespace> depending on the enable_namespace_prefix Terraform variable - write the unprefixed name here either way.",
+          "pattern": "^[a-z0-9][a-z0-9_]{0,254}$",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "owner": {
+          "type": "string",
+          "description": "Team or individual responsible for this namespace. Informational only - not consumed by Terraform.",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of what this namespace is for. Informational only - not consumed by Terraform.",
+          "minLength": 1
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "environments": {
+          "type": "object",
+          "description": "Which environment(s) this namespace (and its tables) should be deployed to, and optionally which IAM roles may produce into it there. Keyed by environment name; each value is either {} (namespace/tables only, no producer) or { iamRoles: [...] } (a producer role + dedicated Athena workgroup edp-<env>-tables-<namespace> is provisioned for the listed role ARNs to assume). If this key is omitted entirely, it defaults to all four environments with no producer in any of them - equivalent to writing dev: {}, test: {}, uat: {}, prod: {}. When present, only the environments listed here are used - there is no default-fill for environments left out.",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "patternProperties": {
+            "^(dev|test|uat|prod)$": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Per-environment configuration. Empty object means the namespace (and its tables) are created here with no producer.",
+              "properties": {
+                "iamRoles": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "description": "IAM role ARNs that may assume the EDP namespace producer role edp-<env>-s3tables-producer-<namespace> Terraform provisions for this namespace in this environment. Omit this key entirely (or omit the environment) for consumer-only access - the namespace and its tables are still created, but no producer role is.",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^arn:aws:iam::[0-9]{12}:role/.+$"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

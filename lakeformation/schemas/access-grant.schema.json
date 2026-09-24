@@ -1,0 +1,108 @@
+{
+  "title": "AccessGrant",
+  "description": "Tag-based Lake Formation grants, one file per principal, driven by lakeformation/access_grants/*.yaml",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "tags.lakeformation.chedaws.io/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "AccessGrant"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["principal", "environments", "owner", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "principal": {
+          "type": "string",
+          "minLength": 1,
+          "description": "An IAM role ARN (arn:aws:iam::<account>:role/<name>) is used directly. Any other value is treated as an AD / IdC group DisplayName and resolved to a group ARN."
+        },
+        "environments": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Single environment name this file applies to (one file per environment)."
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["tags"],
+      "additionalProperties": false,
+      "anyOf": [
+        { "required": ["database"] },
+        { "required": ["table"] }
+      ],
+      "properties": {
+        "tags": {
+          "type": "array",
+          "minItems": 1,
+          "description": "One or more {key, values} pairs. All entries are ANDed together into a single tag expression.",
+          "items": {
+            "type": "object",
+            "required": ["key", "values"],
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Must exist in lakeformation/lf_tags/*.yaml."
+              },
+              "values": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 },
+                "description": "Must all exist for this key in lakeformation/lf_tags/*.yaml."
+              }
+            }
+          }
+        },
+        "database": {
+          "type": "object",
+          "required": ["grants"],
+          "additionalProperties": false,
+          "properties": {
+            "grants": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": ["CREATE_TABLE", "ALTER", "DROP", "DESCRIBE"]
+              }
+            }
+          }
+        },
+        "table": {
+          "type": "object",
+          "required": ["grants"],
+          "additionalProperties": false,
+          "properties": {
+            "grants": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": ["SELECT", "INSERT", "DELETE", "DESCRIBE", "ALTER", "DROP", "ALL"]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

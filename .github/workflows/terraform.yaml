@@ -1,0 +1,47 @@
+name: Deploy EDP Infra
+
+on:
+  push:
+    branches:
+      - "main"
+      - "feature/*"
+      - "feat/*"
+      - "bug/*"
+  workflow_dispatch:
+
+# One job per environment, each a call to tf-deploy.yaml - that's what groups
+# an environment's build and deploy jobs under a single entry in the run view
+# ("dev / build", "dev / deploy-core", ...). Ordering between stacks lives in
+# tf-deploy.yaml; this file only orders dev and test. uat and prod deploy
+# from v* tags in release.yaml.
+jobs:
+  # Runs the static checks for this run's commit. ordered is false off main so
+  # each component's deploy is approvable on its own on feature branches.
+  # ref_type == 'branch' so a workflow_dispatch against a tag doesn't run dev
+  # in feature-branch mode for the tagged commit, where approving it could
+  # roll dev back.
+  dev:
+    if: github.ref_type == 'branch'
+    uses: ./.github/workflows/tf-deploy.yaml
+    with:
+      environment: dev
+      static_checks: true
+      ordered: ${{ github.ref_name == 'main' }}
+      # On main the PR merge is the approval; feature branches approve each
+      # stack's deploy separately.
+      approval: ${{ github.ref_name == 'main' && 'none' || 'per-stack' }}
+
+  # Waits for the whole of dev, including its post-deploy tests. !cancelled()
+  # && !failure() rather than the implicit success(): a dev deploy skipped
+  # because its stack's plan was skipped shouldn't hold test back, but a
+  # failed or rejected one should. No static checks - dev ran them on this
+  # commit.
+  test:
+    needs: [dev]
+    if: github.ref_name == 'main' && !cancelled() && !failure()
+    uses: ./.github/workflows/tf-deploy.yaml
+    with:
+      environment: test
+      ordered: true
+      # One approval (test-deploy), after build, releases every stack.
+      approval: once

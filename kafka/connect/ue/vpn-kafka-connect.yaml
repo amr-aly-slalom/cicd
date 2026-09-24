@@ -1,0 +1,23 @@
+apiVersion: kafka.chedaws.io/v1
+kind: KafkaConnectRegistration
+metadata:
+  name: vpn-kafka-connect
+  owner: vpn-platform-team
+  description: >
+    Confluent Kafka Connect server for VPN business unit.
+    Aggregates vpn/siq and vpn/uiq producer groups.
+spec:
+  variant: confluent
+  sources:
+    - businessName: vpn
+      appName: siq
+    - businessName: vpn
+      appName: uiq
+  connect:
+    onPrem: true
+    environments:
+      uat:
+        certificateSubject:
+          - "CN=IOVLVDC2KAFU1"
+        sourceIps:
+          - "172.28.55.61/32"

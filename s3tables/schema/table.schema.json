@@ -1,0 +1,180 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "S3 Tables (Iceberg) table definition",
+  "description": "Schema for a single table definition file at s3tables/tables/<name>.yaml. One file describes exactly one table. File location has no bearing on which namespace the table belongs to - that comes entirely from metadata.namespace.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "s3tables.chedaws.io/v1",
+      "description": "Always the literal string \"s3tables.chedaws.io/v1\"."
+    },
+    "kind": {
+      "type": "string",
+      "const": "Table",
+      "description": "Always the literal string \"Table\"."
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "name"],
+      "properties": {
+        "namespace": {
+          "type": "string",
+          "description": "Namespace this table belongs to. Must match the `metadata.name` of a namespace YAML file under s3tables/namespaces/. The table inherits its deployment environments from that namespace.",
+          "pattern": "^[a-z0-9][a-z0-9_]{0,254}$",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "name": {
+          "type": "string",
+          "description": "Table name.",
+          "pattern": "^[a-z0-9][a-z0-9_]{0,254}$",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "owner": {
+          "type": "string",
+          "description": "Team or individual responsible for this table. Informational only - not consumed by Terraform.",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of what this table is for. Informational only - not consumed by Terraform.",
+          "minLength": 1
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "const": "ICEBERG",
+          "description": "Always ICEBERG - this is the only table format AWS S3 Tables supports. Present for documentation/consistency only; not read by Terraform (the resource always creates format = \"ICEBERG\" regardless of this field)."
+        },
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Column definitions. Omit entirely (or leave `columns` empty) to create a schema-less Iceberg table. NOTE: changing this after the table exists forces a destroy-and-recreate, which prevent_destroy will refuse.",
+          "properties": {
+            "columns": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "type"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Column name.",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "description": "Apache Iceberg primitive type. Complex/nested types (struct, list, map) exist in the Iceberg spec but are NOT supported by the aws_s3tables_table resource. Parameterized types must be quoted in YAML, e.g. \"decimal(10,2)\".",
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "title": "Non-parameterized primitive type",
+                        "enum": [
+                          "boolean",
+                          "int",
+                          "long",
+                          "float",
+                          "double",
+                          "date",
+                          "time",
+                          "timestamp",
+                          "timestamptz",
+                          "string",
+                          "uuid",
+                          "binary"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "title": "decimal(precision,scale)",
+                        "description": "Fixed-point decimal. Precision 1-38, scale 0-38 and not greater than precision.",
+                        "pattern": "^decimal\\( *[0-9]{1,2} *, *[0-9]{1,2} *\\)$"
+                      },
+                      {
+                        "type": "string",
+                        "title": "fixed(length)",
+                        "description": "Fixed-length byte array.",
+                        "pattern": "^fixed\\( *[0-9]+ *\\)$"
+                      }
+                    ]
+                  },
+                  "required": {
+                    "type": "boolean",
+                    "description": "true if the column does not allow nulls. Defaults to false (nullable) when omitted.",
+                    "default": false
+                  },
+                  "comment": {
+                    "type": "string",
+                    "description": "Human-readable note about this column. Informational only - not consumed by Terraform (the AWS provider's schema field block has no doc/comment attribute).",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "encryption": {
+          "type": "object",
+          "description": "Per-table server-side encryption override. If omitted, the table inherits the bucket's encryption. NOTE: changing this after the table exists forces a destroy-and-recreate, which prevent_destroy will refuse.",
+          "additionalProperties": false,
+          "required": ["sse_algorithm"],
+          "properties": {
+            "sse_algorithm": {
+              "type": "string",
+              "description": "AES256 for S3-managed keys, or aws:kms for KMS-managed keys.",
+              "enum": ["AES256", "aws:kms"]
+            },
+            "kms_key_arn": {
+              "type": "string",
+              "description": "ARN of the KMS key to use. Required when sse_algorithm is aws:kms, and only valid in that case.",
+              "pattern": "^arn:aws[-a-z0-9]*:kms:"
+            }
+          },
+          "if": {
+            "properties": { "sse_algorithm": { "const": "aws:kms" } },
+            "required": ["sse_algorithm"]
+          },
+          "then": { "required": ["kms_key_arn"] }
+        },
+        "policy": {
+          "type": "string",
+          "description": "Resource-based IAM policy for this table only, as a raw JSON document string (use a YAML block scalar). Terraform additionally validates that this parses as JSON.",
+          "minLength": 1
+        },
+        "replication": {
+          "type": "object",
+          "description": "Replicates this table to one or more destination table buckets. The IAM role is NOT created by this module - it must already exist with the permissions S3 Tables replication requires.",
+          "additionalProperties": false,
+          "required": ["role", "destinations"],
+          "properties": {
+            "role": {
+              "type": "string",
+              "description": "ARN of the IAM role S3 assumes to perform replication.",
+              "pattern": "^arn:aws[-a-z0-9]*:iam::[0-9]{12}:role/"
+            },
+            "destinations": {
+              "type": "array",
+              "description": "Destination table bucket ARN(s). One replication rule is created per entry.",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^arn:aws[-a-z0-9]*:s3tables:"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

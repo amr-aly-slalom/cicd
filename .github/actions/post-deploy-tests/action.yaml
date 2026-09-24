@@ -1,0 +1,79 @@
+name: Post-deploy tests
+description: >-
+  Runs tests/post_deploy against a deployed environment under its read-only
+  post-deploy-tests role. Used by tf-deploy.yaml after core deploys, and by
+  post-deploy-tests.yaml for manual runs. The job using it supplies checkout,
+  the runner, the environment and the timeout.
+
+  Auth model (three-hop chained assumption):
+    1. The self-hosted runner carries an EC2 instance profile
+       (chedaws-prod-github-runner-InfraBuildRole in the runner account).
+    2. "Assume ci-runner" performs the first hop explicitly into
+       chedaws-edp-ci-runner in the target account, exporting credentials as
+       AWS_* env vars.
+    3. "Assume post-deploy-tests role" performs the second hop into the
+       read-only chedaws-edp-post-deploy-tests-{env} role, overwriting AWS_*
+       env vars so pytest inherits that constrained identity as ambient
+       credentials. See terraform/post_deploy_tests.tf.
+
+inputs:
+  environment:
+    description: "Target environment (dev, test, uat, prod)"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Export test environment
+      shell: bash
+      run: |
+        echo "ENVIRONMENT=${{ inputs.environment }}" >> "$GITHUB_ENV"
+        echo "AWS_REGION=ap-southeast-2" >> "$GITHUB_ENV"
+
+    - name: Assume ci-runner (first hop)
+      shell: bash
+      run: |
+        declare -A account_ids=(
+          [dev]="381491832813"
+          [test]="381491832813"
+          [uat]="339712719726"
+          [prod]="637423180765"
+        )
+        account_id="${account_ids[${{ inputs.environment }}]}"
+        role_arn="arn:aws:iam::${account_id}:role/chedaws-edp-ci-runner"
+        echo "Assuming ${role_arn}..."
+        creds=$(aws sts assume-role \
+          --role-arn "${role_arn}" \
+          --role-session-name "post-deploy-tests-ci-runner-${{ inputs.environment }}" \
+          --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" \
+          --output text)
+        echo "AWS_ACCESS_KEY_ID=$(echo $creds | awk '{print $1}')" >> "$GITHUB_ENV"
+        echo "AWS_SECRET_ACCESS_KEY=$(echo $creds | awk '{print $2}')" >> "$GITHUB_ENV"
+        echo "AWS_SESSION_TOKEN=$(echo $creds | awk '{print $3}')" >> "$GITHUB_ENV"
+        echo "AWS_ACCOUNT_ID=${account_id}" >> "$GITHUB_ENV"
+
+    - name: Assume post-deploy-tests role (second hop)
+      shell: bash
+      run: |
+        role_arn="arn:aws:iam::${AWS_ACCOUNT_ID}:role/chedaws-edp-post-deploy-tests-${{ inputs.environment }}"
+        echo "Assuming ${role_arn}..."
+        creds=$(aws sts assume-role \
+          --role-arn "${role_arn}" \
+          --role-session-name "post-deploy-tests-${{ inputs.environment }}" \
+          --query "Credentials.[AccessKeyId,SecretAccessKey,SessionToken]" \
+          --output text)
+        echo "AWS_ACCESS_KEY_ID=$(echo $creds | awk '{print $1}')" >> "$GITHUB_ENV"
+        echo "AWS_SECRET_ACCESS_KEY=$(echo $creds | awk '{print $2}')" >> "$GITHUB_ENV"
+        echo "AWS_SESSION_TOKEN=$(echo $creds | awk '{print $3}')" >> "$GITHUB_ENV"
+
+    - name: Set up Python and uv
+      uses: ./.github/actions/setup-python-uv
+
+    # --locked fails rather than silently re-resolving if uv.lock is stale.
+    - name: Install uv-managed dependencies
+      shell: bash
+      run: uv sync --locked
+
+    - name: Run post-deploy tests
+      shell: bash
+      run: uv run pytest tests/post_deploy/ -v --tb=short
