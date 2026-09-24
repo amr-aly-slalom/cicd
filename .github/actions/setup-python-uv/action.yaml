@@ -27,6 +27,13 @@ runs:
       run: |
         python_version="$(cat .python-version)"
         venv_dir="$RUNNER_TEMP/ci-py${python_version//./}"
-        uv venv --python "${python_version}" "${venv_dir}"
+        # --clear: unlike GitHub-hosted runners, self-hosted runners don't get
+        # a fresh VM (and therefore a fresh $RUNNER_TEMP) per job - the same
+        # venv_dir from a previous job on this runner is often still there.
+        # Without --clear, `uv venv` refuses to reuse/overwrite it ("A
+        # directory already exists at: ..."), which is exactly what was
+        # failing here. --clear makes venv creation idempotent regardless of
+        # what a prior job left behind.
+        uv venv --clear --python "${python_version}" "${venv_dir}"
         "${venv_dir}/bin/python3" -m ensurepip --upgrade
         echo "${venv_dir}/bin" >> "$GITHUB_PATH"
