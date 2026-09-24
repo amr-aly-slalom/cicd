@@ -45,7 +45,7 @@ on:
       environment:
         required: true
         type: string
-      # The static-check steps in build (fmt, TFLint, Trivy, ruff, ty,
+      # The static-check steps in build (fmt, TFLint, Checkov, ruff, mypy,
       # pytest, the YAML/registration validators) depend only on the commit,
       # never on the environment - TFLint even pins TF_WORKSPACE=dev. So they're
       # off by default and terraform.yaml only opts in for dev. test, uat and
@@ -76,344 +76,9 @@ on:
         default: per-stack
 
 jobs:
-  # Everything build needs before its container can even start, merged into
-  # one job for two reasons. First, this runner pool only has 3 runners -
-  # fewer jobs matters more here than it would on a larger pool. Second,
-  # and more importantly: every git operation here (the diff this step
-  # itself needs, and this repo's OWN diff for skipping unaffected stacks'
-  # plans) runs on the bare runner, never inside build's container. That's
-  # deliberate, not incidental - build's container runs as root, and a raw
-  # `git diff`/`git fetch` run there hit "detected dubious ownership"
-  # against this runner's shared, persistent checkout on a real run (root's
-  # git refuses to trust a directory it doesn't own outright, however that
-  # ownership got set). Keeping ALL git diffing on the bare runner, in the
-  # SAME job that already checks out the code for this purpose, sidesteps
-  # that whole class of problem rather than continuing to chase ownership
-  # timing inside the container.
-  prepare:
-    name: prepare
-    runs-on: [ self-hosted,aws,cloud-platform,xlarge,x64 ]
-    timeout-minutes: 10
-    outputs:
-      should_publish: ${{ steps.changes.outputs.should_publish }}
-      plan_core: ${{ steps.changes.outputs.plan_core }}
-      plan_rds: ${{ steps.changes.outputs.plan_rds }}
-      plan_redshift: ${{ steps.changes.outputs.plan_redshift }}
-      plan_s3: ${{ steps.changes.outputs.plan_s3 }}
-      plan_s3tables: ${{ steps.changes.outputs.plan_s3tables }}
-      plan_kafka: ${{ steps.changes.outputs.plan_kafka }}
-      plan_mwaa: ${{ steps.changes.outputs.plan_mwaa }}
-      plan_lakeformation: ${{ steps.changes.outputs.plan_lakeformation }}
-      validate_kafka: ${{ steps.changes.outputs.validate_kafka }}
-      validate_s3: ${{ steps.changes.outputs.validate_s3 }}
-      validate_redshift: ${{ steps.changes.outputs.validate_redshift }}
-      validate_s3tables: ${{ steps.changes.outputs.validate_s3tables }}
-      validate_lakeformation: ${{ steps.changes.outputs.validate_lakeformation }}
-      registry: ${{ steps.login.outputs.registry }}
-      password: ${{ steps.login.outputs.password }}
-      runner-uid: ${{ steps.whoami.outputs.uid }}
-      runner-gid: ${{ steps.whoami.outputs.gid }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      # Computed here since this job already runs on the bare runner - not
-      # hardcoded, since it's specific to whatever account happens to run
-      # the actions runner service. Consumed by build's own end-of-job
-      # ownership hand-back (see that job's own comment for why it's needed
-      # and why it's placed where it is).
-      - name: Determine this runner's own UID/GID
-        id: whoami
-        run: |
-          echo "uid=$(id -u)" >> "$GITHUB_OUTPUT"
-          echo "gid=$(id -g)" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve this environment's account ID
-        id: account
-        run: |
-          case "${{ inputs.environment }}" in
-            dev|test) id=381491832813 ;;
-            uat)      id=339712719726 ;;
-            prod)     id=637423180765 ;;
-            *) echo "::error::unknown environment ${{ inputs.environment }}"; exit 1 ;;
-          esac
-          echo "id=$id" >> "$GITHUB_OUTPUT"
-
-      # Assume and fetch the password in ONE step, exporting rather than
-      # writing to $GITHUB_ENV - see .github/actions/publish-ci-image's own
-      # comment for why splitting assume-role from its use across steps is
-      # unreliable on these runners (a real, previously-documented
-      # incident, not a guess).
-      #
-      # The password itself is deliberately NOT ::add-mask::'d, unlike the
-      # STS credentials used to fetch it (which ARE masked below) -
-      # confirmed empirically in an earlier POC that masking a value later
-      # consumed by container.credentials.password (sourced from a job
-      # output) breaks GitHub's own template resolution for that specific
-      # field ("Unexpected value ''"), even though the exact same string is
-      # perfectly safe unmasked here: it's a short-lived (12h) ECR
-      # authorization token, not a long-lived credential, and it's only
-      # ever used to pull this one image.
-      - name: Assume chedaws-edp-ci-runner and fetch an ECR login password
-        id: login
-        env:
-          ROLE_ARN: arn:aws:iam::${{ steps.account.outputs.id }}:role/chedaws-edp-ci-runner
-          ACCOUNT_ID: ${{ steps.account.outputs.id }}
-          ENVIRONMENT: ${{ inputs.environment }}
-        run: |
-          set -euo pipefail
-          creds="$(aws sts assume-role \
-            --role-arn "$ROLE_ARN" \
-            --role-session-name "ecr-login-${ENVIRONMENT}" \
-            --duration-seconds 3600 \
-            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
-            --output text)"
-          access_key_id="$(echo "$creds" | awk '{print $1}')"
-          secret_access_key="$(echo "$creds" | awk '{print $2}')"
-          session_token="$(echo "$creds" | awk '{print $3}')"
-          echo "::add-mask::$access_key_id"
-          echo "::add-mask::$secret_access_key"
-          echo "::add-mask::$session_token"
-          export AWS_ACCESS_KEY_ID="$access_key_id"
-          export AWS_SECRET_ACCESS_KEY="$secret_access_key"
-          export AWS_SESSION_TOKEN="$session_token"
-
-          echo "registry=${ACCOUNT_ID}.dkr.ecr.ap-southeast-2.amazonaws.com" >> "$GITHUB_OUTPUT"
-          echo "password=$(aws ecr get-login-password --region ap-southeast-2)" >> "$GITHUB_OUTPUT"
-
-      # One diff, three classifications: whether the CI image itself needs
-      # republishing (docker/ci-image/**, terraform/ci-image/**, the
-      # composite action, pyproject.toml/uv.lock, every stack's
-      # providers.tf/lock file); which of the 8 terraform stacks this push
-      # actually touches - a stack's own files, a shared module only it
-      # uses (terraform/modules/{kms,rds,s3tables} - see each stack's own
-      # module "..." source), or a stack it reads via terraform_remote_state
-      # (see each stack's own remote_state.tf); and which of the repo's
-      # content validators (Kafka, S3, Redshift, S3Tables, Lake Formation -
-      # see build's own Validate* steps) have anything to check that
-      # actually changed. A real `git diff`, not a GitHub Actions
-      # expression: the only expression-native equivalent
-      # (github.event.head_commit.*) only reflects the LATEST commit of a
-      # multi-commit push, silently missing changes from earlier commits in
-      # the same push.
-      #
-      # Stack propagation is deliberately one direction only - a downstream
-      # stack changing never marks its upstream as needing a replan, since
-      # the upstream's plan can't depend on a consumer's code. This graph
-      # is exactly what each stack's own remote_state.tf already declares
-      # directly - no stack reads another's state transitively through a
-      # third one, so a single hop per stack is the complete picture, not
-      # an approximation of it.
-      #
-      # The validator groups mirror each script's REAL inputs, read
-      # directly from their own source rather than guessed:
-      # validate-redshift-registrations.py cross-references
-      # airflow/mwaa/*.yaml against redshift/namespaces/*.yaml (an MWAA
-      # namespace's Redshift access registration), so a change to either
-      # counts. A change to the validator scripts themselves, or the
-      # Makefile targets that invoke them, marks every validator group
-      # dirty - the data may not have changed, but the logic checking it
-      # has, so the previous "nothing to check" conclusion no longer holds.
-      - name: Diff against the base of this push
-        id: changes
-        env:
-          BASE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          ALL_STACKS="core rds redshift s3 s3tables kafka mwaa lakeformation"
-
-          ALL_VALIDATORS="kafka s3 redshift s3tables lakeformation"
-
-          do_everything_to_be_safe() {
-            echo "should_publish=true" >> "$GITHUB_OUTPUT"
-            for s in $ALL_STACKS; do
-              echo "plan_$s=true" >> "$GITHUB_OUTPUT"
-            done
-            for v in $ALL_VALIDATORS; do
-              echo "validate_$v=true" >> "$GITHUB_OUTPUT"
-            done
-          }
-
-          # github.event.before is unset for workflow_dispatch (and is the
-          # all-zero SHA for a push that created the branch) - fall back to
-          # the parent of HEAD so a manual run still gets a real diff.
-          if [ -z "${BASE_SHA:-}" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
-            BASE_SHA="$(git rev-parse HEAD~1 2>/dev/null || echo "")"
-          fi
-          if [ -z "$BASE_SHA" ]; then
-            echo "No usable base commit (first commit on a new branch?) - doing everything to be safe."
-            do_everything_to_be_safe
-            exit 0
-          fi
-
-          # Defensive, not just theoretical: a real run's diff against a
-          # perfectly valid $BASE_SHA once failed here on this persistent,
-          # shared self-hosted checkout. Fetch it explicitly before giving
-          # up, and if it's STILL not reachable, fall back to doing
-          # everything - the same safe default as above.
-          if ! CHANGED="$(git diff --name-only "$BASE_SHA" "${{ github.sha }}" 2>&1)"; then
-            echo "$CHANGED"
-            echo "Could not diff against $BASE_SHA in this checkout - fetching it explicitly."
-            if git fetch --quiet origin "$BASE_SHA" && CHANGED="$(git diff --name-only "$BASE_SHA" "${{ github.sha }}")"; then
-              echo "Fetched $BASE_SHA - diff succeeded on retry."
-            else
-              echo "Still can't diff against $BASE_SHA - doing everything to be safe."
-              do_everything_to_be_safe
-              exit 0
-            fi
-          fi
-          echo "$CHANGED"
-
-          SHOULD_PUBLISH=false
-          own_core=false; own_rds=false; own_redshift=false; own_s3=false
-          own_s3tables=false; own_kafka=false; own_mwaa=false; own_lakeformation=false
-          validate_kafka=false; validate_s3=false; validate_redshift=false
-          validate_s3tables=false; validate_lakeformation=false
-
-          while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            case "$f" in
-              docker/ci-image/*|terraform/ci-image/*|.github/actions/publish-ci-image/*| \
-              .github/workflows/publish-ci-image.yaml|pyproject.toml|uv.lock| \
-              terraform/*/providers.tf|terraform/providers.tf| \
-              terraform/*/.terraform.lock.hcl|terraform/.terraform.lock.hcl)
-                SHOULD_PUBLISH=true
-                ;;
-            esac
-            case "$f" in
-              terraform/modules/kms/*)      own_core=true ;;
-              terraform/modules/rds/*)      own_rds=true ;;
-              terraform/modules/s3tables/*) own_s3tables=true ;;
-              terraform/ci-image/*)         : ;; # separate stack, not part of build's plan loop
-              terraform/rds/*)              own_rds=true ;;
-              terraform/redshift/*)         own_redshift=true ;;
-              terraform/s3tables/*)         own_s3tables=true ;;
-              terraform/s3/*)               own_s3=true ;;
-              terraform/kafka/*)            own_kafka=true ;;
-              terraform/mwaa/*)             own_mwaa=true ;;
-              terraform/lakeformation/*)    own_lakeformation=true ;;
-              terraform/*)                  own_core=true ;;
-            esac
-            # These are all data dirs at the repo root, distinct from the
-            # terraform/<stack>/ dirs matched above (e.g. s3/* here is
-            # registration YAML, not terraform/s3/*'s .tf files).
-            case "$f" in
-              kafka/producers/*|kafka/consumers/*|kafka/connect/*|kafka/schema/*)
-                validate_kafka=true
-                ;;
-              s3/*)
-                validate_s3=true
-                ;;
-              redshift/*|airflow/mwaa/*)
-                # validate-redshift-registrations.py cross-references these
-                # two directories against each other - see this step's own
-                # header comment.
-                validate_redshift=true
-                ;;
-              s3tables/*)
-                validate_s3tables=true
-                ;;
-              lakeformation/*)
-                validate_lakeformation=true
-                ;;
-              .github/scripts/validate-*.py|Makefile)
-                # The checking logic itself changed - the data underneath
-                # any given validator may not have, but the previous
-                # "nothing to check" conclusion no longer holds for any of
-                # them.
-                validate_kafka=true; validate_s3=true; validate_redshift=true
-                validate_s3tables=true; validate_lakeformation=true
-                ;;
-            esac
-          done <<< "$CHANGED"
-
-          echo "should_publish=$SHOULD_PUBLISH" >> "$GITHUB_OUTPUT"
-
-          for v in $ALL_VALIDATORS; do
-            var="validate_$v"
-            echo "$var=${!var}" >> "$GITHUB_OUTPUT"
-          done
-
-          # true if any argument is "true" - one line per stack below,
-          # OR-ing its own files with every stack it reads via
-          # terraform_remote_state.
-          any_true() {
-            for v in "$@"; do [ "$v" = "true" ] && { echo true; return; }; done
-            echo false
-          }
-
-          plan_core=$own_core
-          plan_rds=$own_rds
-          plan_redshift=$(any_true "$own_redshift" "$own_core")
-          plan_s3=$(any_true "$own_s3" "$own_core")
-          plan_s3tables=$(any_true "$own_s3tables" "$own_core")
-          plan_kafka=$(any_true "$own_kafka" "$own_core" "$own_s3")
-          plan_mwaa=$(any_true "$own_mwaa" "$own_core" "$own_redshift")
-          plan_lakeformation=$(any_true "$own_lakeformation" "$own_core" "$own_redshift" "$own_s3tables")
-
-          for s in $ALL_STACKS; do
-            var="plan_$s"
-            echo "$var=${!var}"
-            echo "$var=${!var}" >> "$GITHUB_OUTPUT"
-            if [ "${!var}" = "false" ]; then
-              echo "::notice title=Skipped ${s} plan::Neither ${s}'s own files nor any stack it reads via terraform_remote_state changed - plan and apply are skipped this run."
-            fi
-          done
-
-  # Only runs when prepare says something the image is built from actually
-  # changed. build (and transitively every deploy job, since they all key
-  # off needs.build.result) waits for this to finish when it runs, and
-  # proceeds immediately when it's skipped - see build's own needs/if below.
-  publish-ci-image:
-    name: publish-ci-image
-    needs: [prepare]
-    if: needs.prepare.outputs.should_publish == 'true'
-    runs-on: [ self-hosted,aws,cloud-platform,xlarge,x64 ]
-    timeout-minutes: 45
-    steps:
-      # First step, before checkout: this runner's local Docker cache
-      # accumulates a new, uniquely SHA-tagged copy of the ci-image every
-      # single run (docker push doesn't clean up the local cache it pushed
-      # from), on a runner whose disk has already filled up once for
-      # unrelated reasons - a real, compounding risk on a persistent,
-      # self-hosted runner in a way it never would be on an ephemeral
-      # GitHub-hosted one. Runs before checkout specifically so a
-      # subsequent step failing to even check out the repo (disk already
-      # full) doesn't also block the one step that would have freed the
-      # space. --force: these are this workflow's own images, safe to
-      # remove regardless of whether anything currently references them.
-      - name: Remove old local copies of the CI image
-        run: |
-          docker images --filter 'reference=*chedaws-edp-ci-image*' -q \
-            | xargs -r docker rmi --force
-
-      - uses: actions/checkout@v4
-      - name: Resolve this environment's account ID
-        id: account
-        run: |
-          case "${{ inputs.environment }}" in
-            dev|test) id=381491832813 ;;
-            uat)      id=339712719726 ;;
-            prod)     id=637423180765 ;;
-            *) echo "::error::unknown environment ${{ inputs.environment }}"; exit 1 ;;
-          esac
-          echo "id=$id" >> "$GITHUB_OUTPUT"
-      - uses: ./.github/actions/publish-ci-image
-        with:
-          environment: ${{ inputs.environment }}
-          account-id: ${{ steps.account.outputs.id }}
-
   build:
     name: build
-    needs: [prepare, publish-ci-image]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.publish-ci-image.result == 'success' || needs.publish-ci-image.result == 'skipped') }}
     runs-on: [ self-hosted,aws,cloud-platform,xlarge,x64 ] # Specify your runner here if using self-hosted
-    container:
-      image: ${{ needs.prepare.outputs.registry }}/chedaws-edp-ci-image-${{ inputs.environment }}:latest
-      credentials:
-        username: AWS
-        password: ${{ needs.prepare.outputs.password }}
     environment: "${{ inputs.environment }}-tfplan"
     timeout-minutes: 45
     outputs:
@@ -426,18 +91,47 @@ jobs:
       uploaded_url_mwaa: ${{ steps.plan_mwaa.outputs.s3_location }}
       uploaded_url_lakeformation: ${{ steps.plan_lakeformation.outputs.s3_location }}
     steps:
-      # No Setup Terraform, no provider-cache config, no Setup TFLint, no Set
-      # up Python and uv - the image already has all of that baked in
-      # (terraform, tflint, this repo's exact locked provider versions per
-      # stack, and a fully-installed uv venv matching uv.lock at the image's
-      # build time - see docker/ci-image/Dockerfile and
-      # .github/actions/publish-ci-image).
-      # No fetch-depth: 0 here - unlike prepare's own checkout, nothing in
-      # this job needs history beyond the current commit; the per-stack
-      # diffing that used to live here moved to prepare (see that job's own
-      # comment for why).
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Terraform
+        uses: networkanalytics-actions/hashicorp-setup-terraform@v3
+
+      # One shared provider cache for every root module's init. On Linux,
+      # terraform init symlinks .terraform/providers/... into this directory
+      # instead of unpacking its own copy - the aws provider alone is ~700MB,
+      # and a plan job inits three modules, which is what filled the runner's
+      # disk. RUNNER_TOOL_CACHE persists between jobs on self-hosted runners,
+      # so later runs skip the download entirely.
+      #
+      # A cached provider is only used if the module's .terraform.lock.hcl has
+      # an h1: checksum for this platform (linux_amd64); otherwise init quietly
+      # downloads it again. When updating a lock file on another OS, run
+      # `terraform providers lock -platform=linux_amd64` so CI keeps hitting
+      # the cache.
+      - name: Configure Terraform provider cache
+        run: |
+          cache_dir="${RUNNER_TOOL_CACHE:-$HOME/.cache}/terraform-plugin-cache"
+          mkdir -p "$cache_dir"
+          echo "TF_PLUGIN_CACHE_DIR=$cache_dir" >> "$GITHUB_ENV"
+
+      - name: Setup TFLint
+        if: inputs.static_checks
+        uses: networkanalytics-actions/terraform-linters-setup-tflint@v4
+        with:
+          tflint_version: v0.52.0
+
+      - name: Set up Python and uv
+        if: inputs.static_checks
+        uses: ./.github/actions/setup-python-uv
+
+      # --locked fails rather than silently re-resolving if uv.lock is stale
+      # against pyproject.toml, so CI can't drift from the committed pins.
+      - name: Install uv-managed dependencies
+        if: inputs.static_checks
+        run: uv sync --locked
 
       # --- Static-Check ---------------------------------------------------
 
@@ -451,10 +145,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-      # Checkov removed (see Run Trivy, after every stack's plan below) - a
-      # compiled Go binary baked straight into the image
-      # (docker/ci-image/Dockerfile), not a Docker-container Action needing
-      # its own image pull on every run.
+      - name: Run Checkov
+        if: inputs.static_checks
+        uses: networkanalytics-actions/bridgecrewio-checkov-action@master
+        with:
+          directory: ./terraform
+          check: CKV_*
+          quiet: true
+          soft_fail: false
+          download_external_modules: true
 
       # --- Python Checks (edp_dbt plugin) ---------------------------------
 
@@ -462,14 +161,8 @@ jobs:
         if: inputs.static_checks
         run: make lint
 
-      # ty replaces mypy. Still experimental (0.0.x, no stable API yet) and
-      # surfaces diagnostics against paths mypy previously passed cleanly
-      # (confirmed 75 in this repo, not yet triaged) - continue-on-error
-      # keeps it visible (still runs, still shown in the log) without
-      # permanently reddening the pipeline on unreviewed findings.
-      - name: Typecheck (ty - experimental, non-blocking)
+      - name: Typecheck (mypy --strict)
         if: inputs.static_checks
-        continue-on-error: true
         run: make typecheck
 
       - name: Run tests
@@ -477,47 +170,43 @@ jobs:
         run: make test
 
       # --- Kafka Topics ----------------------------------------------------
-      # Gated on prepare's own validate_kafka output alongside static_checks
-      # - see prepare's "Diff against the base of this push" for exactly
-      # which paths count (kafka/{producers,consumers,connect,schema}/**,
-      # or a change to the validator scripts/Makefile themselves).
 
       - name: Kafka schema validation
-        if: inputs.static_checks && needs.prepare.outputs.validate_kafka == 'true'
+        if: inputs.static_checks
         run: make validate-kafka-schema
 
       - name: Kafka naming and placement validation — producers
-        if: inputs.static_checks && needs.prepare.outputs.validate_kafka == 'true'
+        if: inputs.static_checks
         run: make validate-kafka-topics-producers
 
       - name: Kafka naming and placement validation — consumers
-        if: inputs.static_checks && needs.prepare.outputs.validate_kafka == 'true'
+        if: inputs.static_checks
         run: make validate-kafka-topics-consumers
 
       - name: Kafka naming and cross-reference validation — connect registrations
-        if: inputs.static_checks && needs.prepare.outputs.validate_kafka == 'true'
+        if: inputs.static_checks
         run: make validate-kafka-topics-connect
 
       # --- S3 Producers ----------------------------------------------------
 
       - name: Validate S3 registrations
-        if: inputs.static_checks && needs.prepare.outputs.validate_s3 == 'true'
+        if: inputs.static_checks
         run: make validate-s3-registrations
 
       # --- Redshift Namespaces ----------------------------------------------
 
       - name: Validate Redshift namespace registrations
-        if: inputs.static_checks && needs.prepare.outputs.validate_redshift == 'true'
+        if: inputs.static_checks
         run: make validate-redshift-registrations
 
       # --- Yaml Validation ---------------------------------------------------
 
       - name: S3Tables yaml validation
-        if: inputs.static_checks && needs.prepare.outputs.validate_s3tables == 'true'
+        if: inputs.static_checks
         run: make validate-s3tables-yaml
 
       - name: Lake Formation yaml validation
-        if: inputs.static_checks && needs.prepare.outputs.validate_lakeformation == 'true'
+        if: inputs.static_checks
         run: make validate-lakeformation-yaml
 
       # --- Terraform Plan ---------------------------------------------------
@@ -530,365 +219,190 @@ jobs:
       # true of a brand-new environment - skips its init and plan, leaves its
       # uploaded_url_* output empty, and terraform.yaml skips its apply. See
       # .github/scripts/tf-upstreams-deployed.sh.
-      #
-      # Every stack's own Init is gated on its own plan_<stack> output (core
-      # directly; every other stack indirectly, via its own upstream-check
-      # step being skipped whenever ITS plan is - see each one's own
-      # comment). This is safe even for core/redshift/s3/s3tables, which DO
-      # have downstream dependents, because tf-upstreams-deployed.sh
-      # initializes whatever upstream dir it's asked to check itself - it
-      # no longer assumes that upstream's own "official" Init step already
-      # ran this pass. The two concerns are fully decoupled: whether a
-      # stack gets its own fresh plan this run, and whether something else
-      # needs to read its already-applied state.
+
       - name: Terraform Init (core)
         id: init
-        if: needs.prepare.outputs.plan_core == 'true'
         working-directory: ./terraform
-        run: |
-          terraform init
-          terraform workspace select -or-create "${{ inputs.environment }}"
+        run: terraform init
 
-      # -parallelism=20: Terraform's own default is 10. Applied consistently
-      # across every stack's plan here and the real apply in
-      # .github/actions/tf-deploy - a plan/apply pair for the same stack
-      # disagreeing on this wouldn't cause a correctness problem (it's a
-      # client-side concurrency knob, not part of the plan itself), just an
-      # inconsistent speed profile between the two.
       - name: Terraform Plan (core)
         id: plan
-        if: needs.prepare.outputs.plan_core == 'true'
         working-directory: ./terraform
         run: |
           export WORKSPACE="${{ inputs.environment }}"
-          terraform plan -lock-timeout=10m -parallelism=20 -out tfapply
+          terraform workspace select -or-create $WORKSPACE
+          terraform plan -lock-timeout=10m -out tfapply
           S3_PATH="chedaws-prod-terraform-state-file/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/$GITHUB_RUN_ID/$WORKSPACE/tfapply"
           echo "s3_location=$S3_PATH" >> $GITHUB_OUTPUT
-          # boto3, not the aws CLI - the image never bakes the CLI in
-          # (chedaws' runners have it natively, but the container: job's own
-          # filesystem is the image's, not the host's - see
-          # docker/ci-image/Dockerfile). boto3 is already a real dependency
-          # (edp_dbt/edp_secrets avoid it directly, but it's still pulled in
-          # transitively and pinned in pyproject.toml), so this is the same
-          # upload at zero extra image weight.
-          python3 -c "
-          import sys
-          import boto3
-          bucket, key = sys.argv[1].split('/', 1)
-          boto3.client('s3').upload_file('tfapply', bucket, key)
-          " "$S3_PATH"
+          aws s3 cp tfapply "s3://$S3_PATH"
 
       - name: Check upstream stacks are deployed (redshift)
         id: deps_redshift
-        if: needs.prepare.outputs.plan_redshift == 'true'
-        run: bash .github/scripts/tf-upstreams-deployed.sh redshift "${{ inputs.environment }}" terraform
+        run: bash .github/scripts/tf-upstreams-deployed.sh redshift terraform
 
       - name: Terraform Init (redshift)
         id: init_redshift
         if: steps.deps_redshift.outputs.ready == 'true'
         working-directory: ./terraform/redshift
-        run: |
-          terraform init
-          # -or-create: a brand-new environment's workspace legitimately
-          # doesn't exist yet - show what applying from scratch would do.
-          terraform workspace select -or-create "${{ inputs.environment }}"
+        run: terraform init
 
       - name: Terraform Plan (redshift)
         id: plan_redshift
-        if: steps.deps_redshift.outputs.ready == 'true' && needs.prepare.outputs.plan_redshift == 'true'
+        if: steps.deps_redshift.outputs.ready == 'true'
         working-directory: ./terraform/redshift
         run: |
           export WORKSPACE="${{ inputs.environment }}"
-          terraform plan -lock-timeout=10m -parallelism=20 -out tfapply
+          # -or-create: a brand-new environment's workspace legitimately
+          # doesn't exist yet - show what applying from scratch would do.
+          terraform workspace select -or-create $WORKSPACE
+          terraform plan -lock-timeout=10m -out tfapply
           S3_PATH="chedaws-prod-terraform-state-file/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/$GITHUB_RUN_ID/$WORKSPACE/redshift-tfapply"
           echo "s3_location=$S3_PATH" >> $GITHUB_OUTPUT
-          # boto3, not the aws CLI - the image never bakes the CLI in
-          # (chedaws' runners have it natively, but the container: job's own
-          # filesystem is the image's, not the host's - see
-          # docker/ci-image/Dockerfile). boto3 is already a real dependency
-          # (edp_dbt/edp_secrets avoid it directly, but it's still pulled in
-          # transitively and pinned in pyproject.toml), so this is the same
-          # upload at zero extra image weight.
-          python3 -c "
-          import sys
-          import boto3
-          bucket, key = sys.argv[1].split('/', 1)
-          boto3.client('s3').upload_file('tfapply', bucket, key)
-          " "$S3_PATH"
+          aws s3 cp tfapply "s3://$S3_PATH"
 
       - name: Check upstream stacks are deployed (s3tables)
         id: deps_s3tables
-        if: needs.prepare.outputs.plan_s3tables == 'true'
-        run: bash .github/scripts/tf-upstreams-deployed.sh s3tables "${{ inputs.environment }}" terraform
+        run: bash .github/scripts/tf-upstreams-deployed.sh s3tables terraform
 
       - name: Terraform Init (s3tables)
         id: init_s3tables
         if: steps.deps_s3tables.outputs.ready == 'true'
         working-directory: ./terraform/s3tables
-        run: |
-          terraform init
-          # -or-create: a brand-new environment's workspace legitimately
-          # doesn't exist yet - show what applying from scratch would do.
-          terraform workspace select -or-create "${{ inputs.environment }}"
+        run: terraform init
 
       - name: Terraform Plan (s3tables)
         id: plan_s3tables
-        if: steps.deps_s3tables.outputs.ready == 'true' && needs.prepare.outputs.plan_s3tables == 'true'
+        if: steps.deps_s3tables.outputs.ready == 'true'
         working-directory: ./terraform/s3tables
         run: |
           export WORKSPACE="${{ inputs.environment }}"
-          terraform plan -lock-timeout=10m -parallelism=20 -out tfapply
+          # -or-create: a brand-new environment's workspace legitimately
+          # doesn't exist yet - show what applying from scratch would do.
+          terraform workspace select -or-create $WORKSPACE
+          terraform plan -lock-timeout=10m -out tfapply
           S3_PATH="chedaws-prod-terraform-state-file/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/$GITHUB_RUN_ID/$WORKSPACE/s3tables-tfapply"
           echo "s3_location=$S3_PATH" >> $GITHUB_OUTPUT
-          # boto3, not the aws CLI - the image never bakes the CLI in
-          # (chedaws' runners have it natively, but the container: job's own
-          # filesystem is the image's, not the host's - see
-          # docker/ci-image/Dockerfile). boto3 is already a real dependency
-          # (edp_dbt/edp_secrets avoid it directly, but it's still pulled in
-          # transitively and pinned in pyproject.toml), so this is the same
-          # upload at zero extra image weight.
-          python3 -c "
-          import sys
-          import boto3
-          bucket, key = sys.argv[1].split('/', 1)
-          boto3.client('s3').upload_file('tfapply', bucket, key)
-          " "$S3_PATH"
+          aws s3 cp tfapply "s3://$S3_PATH"
 
       - name: Check upstream stacks are deployed (s3)
         id: deps_s3
-        if: needs.prepare.outputs.plan_s3 == 'true'
-        run: bash .github/scripts/tf-upstreams-deployed.sh s3 "${{ inputs.environment }}" terraform
+        run: bash .github/scripts/tf-upstreams-deployed.sh s3 terraform
 
       - name: Terraform Init (s3)
         id: init_s3
         if: steps.deps_s3.outputs.ready == 'true'
         working-directory: ./terraform/s3
-        run: |
-          terraform init
-          # -or-create: a brand-new environment's workspace legitimately
-          # doesn't exist yet - show what applying from scratch would do.
-          terraform workspace select -or-create "${{ inputs.environment }}"
+        run: terraform init
 
       - name: Terraform Plan (s3)
         id: plan_s3
-        if: steps.deps_s3.outputs.ready == 'true' && needs.prepare.outputs.plan_s3 == 'true'
+        if: steps.deps_s3.outputs.ready == 'true'
         working-directory: ./terraform/s3
         run: |
           export WORKSPACE="${{ inputs.environment }}"
-          terraform plan -lock-timeout=10m -parallelism=20 -out tfapply
+          # -or-create: a brand-new environment's workspace legitimately
+          # doesn't exist yet - show what applying from scratch would do.
+          terraform workspace select -or-create $WORKSPACE
+          terraform plan -lock-timeout=10m -out tfapply
           S3_PATH="chedaws-prod-terraform-state-file/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/$GITHUB_RUN_ID/$WORKSPACE/s3-tfapply"
           echo "s3_location=$S3_PATH" >> $GITHUB_OUTPUT
-          # boto3, not the aws CLI - the image never bakes the CLI in
-          # (chedaws' runners have it natively, but the container: job's own
-          # filesystem is the image's, not the host's - see
-          # docker/ci-image/Dockerfile). boto3 is already a real dependency
-          # (edp_dbt/edp_secrets avoid it directly, but it's still pulled in
-          # transitively and pinned in pyproject.toml), so this is the same
-          # upload at zero extra image weight.
-          python3 -c "
-          import sys
-          import boto3
-          bucket, key = sys.argv[1].split('/', 1)
-          boto3.client('s3').upload_file('tfapply', bucket, key)
-          " "$S3_PATH"
+          aws s3 cp tfapply "s3://$S3_PATH"
 
       - name: Check upstream stacks are deployed (rds)
         id: deps_rds
-        if: needs.prepare.outputs.plan_rds == 'true'
-        run: bash .github/scripts/tf-upstreams-deployed.sh rds "${{ inputs.environment }}" terraform
+        run: bash .github/scripts/tf-upstreams-deployed.sh rds terraform
 
       - name: Terraform Init (rds)
         id: init_rds
         if: steps.deps_rds.outputs.ready == 'true'
         working-directory: ./terraform/rds
-        run: |
-          terraform init
-          # -or-create: a brand-new environment's workspace legitimately
-          # doesn't exist yet - show what applying from scratch would do.
-          terraform workspace select -or-create "${{ inputs.environment }}"
+        run: terraform init
 
       - name: Terraform Plan (rds)
         id: plan_rds
-        if: steps.deps_rds.outputs.ready == 'true' && needs.prepare.outputs.plan_rds == 'true'
+        if: steps.deps_rds.outputs.ready == 'true'
         working-directory: ./terraform/rds
         run: |
           export WORKSPACE="${{ inputs.environment }}"
-          terraform plan -lock-timeout=10m -parallelism=20 -out tfapply
+          # -or-create: a brand-new environment's workspace legitimately
+          # doesn't exist yet - show what applying from scratch would do.
+          terraform workspace select -or-create $WORKSPACE
+          terraform plan -lock-timeout=10m -out tfapply
           S3_PATH="chedaws-prod-terraform-state-file/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/$GITHUB_RUN_ID/$WORKSPACE/rds-tfapply"
           echo "s3_location=$S3_PATH" >> $GITHUB_OUTPUT
-          # boto3, not the aws CLI - the image never bakes the CLI in
-          # (chedaws' runners have it natively, but the container: job's own
-          # filesystem is the image's, not the host's - see
-          # docker/ci-image/Dockerfile). boto3 is already a real dependency
-          # (edp_dbt/edp_secrets avoid it directly, but it's still pulled in
-          # transitively and pinned in pyproject.toml), so this is the same
-          # upload at zero extra image weight.
-          python3 -c "
-          import sys
-          import boto3
-          bucket, key = sys.argv[1].split('/', 1)
-          boto3.client('s3').upload_file('tfapply', bucket, key)
-          " "$S3_PATH"
+          aws s3 cp tfapply "s3://$S3_PATH"
 
       - name: Check upstream stacks are deployed (kafka)
         id: deps_kafka
-        if: needs.prepare.outputs.plan_kafka == 'true'
-        run: bash .github/scripts/tf-upstreams-deployed.sh kafka "${{ inputs.environment }}" terraform terraform/s3
+        run: bash .github/scripts/tf-upstreams-deployed.sh kafka terraform terraform/s3
 
       - name: Terraform Init (kafka)
         id: init_kafka
         if: steps.deps_kafka.outputs.ready == 'true'
         working-directory: ./terraform/kafka
-        run: |
-          terraform init
-          # -or-create: a brand-new environment's workspace legitimately
-          # doesn't exist yet - show what applying from scratch would do.
-          terraform workspace select -or-create "${{ inputs.environment }}"
+        run: terraform init
 
       - name: Terraform Plan (kafka)
         id: plan_kafka
-        if: steps.deps_kafka.outputs.ready == 'true' && needs.prepare.outputs.plan_kafka == 'true'
+        if: steps.deps_kafka.outputs.ready == 'true'
         working-directory: ./terraform/kafka
         run: |
           export WORKSPACE="${{ inputs.environment }}"
-          terraform plan -lock-timeout=10m -parallelism=20 -out tfapply
+          # -or-create: a brand-new environment's workspace legitimately
+          # doesn't exist yet - show what applying from scratch would do.
+          terraform workspace select -or-create $WORKSPACE
+          terraform plan -lock-timeout=10m -out tfapply
           S3_PATH="chedaws-prod-terraform-state-file/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/$GITHUB_RUN_ID/$WORKSPACE/kafka-tfapply"
           echo "s3_location=$S3_PATH" >> $GITHUB_OUTPUT
-          # boto3, not the aws CLI - the image never bakes the CLI in
-          # (chedaws' runners have it natively, but the container: job's own
-          # filesystem is the image's, not the host's - see
-          # docker/ci-image/Dockerfile). boto3 is already a real dependency
-          # (edp_dbt/edp_secrets avoid it directly, but it's still pulled in
-          # transitively and pinned in pyproject.toml), so this is the same
-          # upload at zero extra image weight.
-          python3 -c "
-          import sys
-          import boto3
-          bucket, key = sys.argv[1].split('/', 1)
-          boto3.client('s3').upload_file('tfapply', bucket, key)
-          " "$S3_PATH"
+          aws s3 cp tfapply "s3://$S3_PATH"
 
       - name: Check upstream stacks are deployed (mwaa)
         id: deps_mwaa
-        if: needs.prepare.outputs.plan_mwaa == 'true'
-        run: bash .github/scripts/tf-upstreams-deployed.sh mwaa "${{ inputs.environment }}" terraform terraform/redshift
+        run: bash .github/scripts/tf-upstreams-deployed.sh mwaa terraform terraform/redshift
 
       - name: Terraform Init (mwaa)
         id: init_mwaa
         if: steps.deps_mwaa.outputs.ready == 'true'
         working-directory: ./terraform/mwaa
-        run: |
-          terraform init
-          # -or-create: a brand-new environment's workspace legitimately
-          # doesn't exist yet - show what applying from scratch would do.
-          terraform workspace select -or-create "${{ inputs.environment }}"
+        run: terraform init
 
       - name: Terraform Plan (mwaa)
         id: plan_mwaa
-        if: steps.deps_mwaa.outputs.ready == 'true' && needs.prepare.outputs.plan_mwaa == 'true'
+        if: steps.deps_mwaa.outputs.ready == 'true'
         working-directory: ./terraform/mwaa
         run: |
           export WORKSPACE="${{ inputs.environment }}"
-          terraform plan -lock-timeout=10m -parallelism=20 -out tfapply
+          # -or-create: a brand-new environment's workspace legitimately
+          # doesn't exist yet - show what applying from scratch would do.
+          terraform workspace select -or-create $WORKSPACE
+          terraform plan -lock-timeout=10m -out tfapply
           S3_PATH="chedaws-prod-terraform-state-file/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/$GITHUB_RUN_ID/$WORKSPACE/mwaa-tfapply"
           echo "s3_location=$S3_PATH" >> $GITHUB_OUTPUT
-          # boto3, not the aws CLI - the image never bakes the CLI in
-          # (chedaws' runners have it natively, but the container: job's own
-          # filesystem is the image's, not the host's - see
-          # docker/ci-image/Dockerfile). boto3 is already a real dependency
-          # (edp_dbt/edp_secrets avoid it directly, but it's still pulled in
-          # transitively and pinned in pyproject.toml), so this is the same
-          # upload at zero extra image weight.
-          python3 -c "
-          import sys
-          import boto3
-          bucket, key = sys.argv[1].split('/', 1)
-          boto3.client('s3').upload_file('tfapply', bucket, key)
-          " "$S3_PATH"
+          aws s3 cp tfapply "s3://$S3_PATH"
 
       - name: Check upstream stacks are deployed (lakeformation)
         id: deps_lakeformation
-        if: needs.prepare.outputs.plan_lakeformation == 'true'
-        run: bash .github/scripts/tf-upstreams-deployed.sh lakeformation "${{ inputs.environment }}" terraform terraform/redshift terraform/s3tables
+        run: bash .github/scripts/tf-upstreams-deployed.sh lakeformation terraform terraform/redshift terraform/s3tables
 
       - name: Terraform Init (lakeformation)
         id: init_lakeformation
         if: steps.deps_lakeformation.outputs.ready == 'true'
         working-directory: ./terraform/lakeformation
-        run: |
-          terraform init
-          # -or-create: a brand-new environment's workspace legitimately
-          # doesn't exist yet - show what applying from scratch would do.
-          terraform workspace select -or-create "${{ inputs.environment }}"
+        run: terraform init
 
       - name: Terraform Plan (lakeformation)
         id: plan_lakeformation
-        if: steps.deps_lakeformation.outputs.ready == 'true' && needs.prepare.outputs.plan_lakeformation == 'true'
+        if: steps.deps_lakeformation.outputs.ready == 'true'
         working-directory: ./terraform/lakeformation
         run: |
           export WORKSPACE="${{ inputs.environment }}"
-          terraform plan -lock-timeout=10m -parallelism=20 -out tfapply
+          # -or-create: a brand-new environment's workspace legitimately
+          # doesn't exist yet - show what applying from scratch would do.
+          terraform workspace select -or-create $WORKSPACE
+          terraform plan -lock-timeout=10m -out tfapply
           S3_PATH="chedaws-prod-terraform-state-file/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/$GITHUB_RUN_ID/$WORKSPACE/lakeformation-tfapply"
           echo "s3_location=$S3_PATH" >> $GITHUB_OUTPUT
-          # boto3, not the aws CLI - the image never bakes the CLI in
-          # (chedaws' runners have it natively, but the container: job's own
-          # filesystem is the image's, not the host's - see
-          # docker/ci-image/Dockerfile). boto3 is already a real dependency
-          # (edp_dbt/edp_secrets avoid it directly, but it's still pulled in
-          # transitively and pinned in pyproject.toml), so this is the same
-          # upload at zero extra image weight.
-          python3 -c "
-          import sys
-          import boto3
-          bucket, key = sys.argv[1].split('/', 1)
-          boto3.client('s3').upload_file('tfapply', bucket, key)
-          " "$S3_PATH"
-
-      # Runs here, after every stack's own `terraform init`/plan above, not
-      # earlier alongside the other static checks, so any local .tf gets
-      # scanned against a real checkout. --tf-exclude-downloaded-modules
-      # stops trivy evaluating vendored module sources at all - confirmed,
-      # not assumed, this is needed for two reasons: (1) without it, trivy
-      # does its OWN remote module resolution independent of whatever
-      # `terraform init` above already fetched into .terraform/modules/,
-      # and a real local run hung for minutes trying to `git clone`
-      # terraform-aws-modules/terraform-aws-s3-bucket straight from
-      # github.com - this runner's proxy config should carry through here
-      # (unlike inside `docker build`'s isolated network namespace - see
-      # docker/ci-image/Dockerfile), but there's no reason to make trivy
-      # redo module resolution `terraform init` already did; (2) it also
-      # cuts out findings against that vendored module's own code (a real
-      # ruleset/behaviour difference from checkov, not something this
-      # repo's commits control anyway - it's third-party code). --skip-dirs
-      # additionally excludes the raw .terraform/ dirs themselves (provider
-      # binaries etc.) from being walked at all. --exit-code 1: trivy's own
-      # default exit code is 0 regardless of findings; this restores
-      # checkov's hard-fail-on-findings behaviour. Independent of whether
-      # any given stack's plan above was skipped (upstream not deployed
-      # yet) - scans whatever .tf files exist in the checkout either way.
-      - name: Run Trivy
-        if: inputs.static_checks
-        run: trivy config --exit-code 1 --skip-dirs '**/.terraform/**' --tf-exclude-downloaded-modules ./terraform
-
-      # Hands the checkout back to the runner's own non-root user for the
-      # next, non-container job that touches this same persistent checkout.
-      # Placed at the END of the job, not right after Checkout, so it also
-      # catches everything else this job writes as root along the way
-      # (.terraform/ dirs, tfapply files, Trivy's cache) - an earlier
-      # version only chowned right after Checkout and left exactly these
-      # later writes root-owned, breaking the next job's own checkout
-      # anyway. This job no longer runs any raw git commands itself (the
-      # per-stack diffing that used to live here moved to prepare - see its
-      # own comment for why: doing it here, as root, hit git's "detected
-      # dubious ownership" refusal against this same shared checkout on a
-      # real run), so there's no longer a risk of a mid-job chown breaking
-      # a LATER step in this job the way there would have been before.
-      # if: always() so this still runs even if an earlier step (e.g. Run
-      # Trivy) failed - a failed build shouldn't leave the workspace stuck
-      # for every run after it.
-      - name: Fix workspace ownership for later non-container jobs
-        if: always()
-        run: chown -R ${{ needs.prepare.outputs.runner-uid }}:${{ needs.prepare.outputs.runner-gid }} "$GITHUB_WORKSPACE"
+          aws s3 cp tfapply "s3://$S3_PATH"
 
   # One approval for the whole release, given after build so the plans in its
   # log can be reviewed first. Every ordered deploy job waits on deploy-core,
@@ -908,12 +422,8 @@ jobs:
     name: deploy-core
     needs: [build, approve]
     # approve is skipped for per-stack and none; for anything else it must
-    # have succeeded. uploaded_url_core != '': every other stack's deploy
-    # job already skips when its plan was skipped (see prepare's own
-    # plan_<stack> outputs) - core was missing this same check, a
-    # pre-existing gap that only became visible once core's own plan could
-    # legitimately be skipped too (previously it almost never was).
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.build.outputs.uploaded_url_core != '' && (needs.approve.result == 'success' || (needs.approve.result == 'skipped' && (inputs.approval == 'per-stack' || inputs.approval == 'none'))) }}
+    # have succeeded.
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.approve.result == 'success' || (needs.approve.result == 'skipped' && (inputs.approval == 'per-stack' || inputs.approval == 'none'))) }}
     runs-on: [ self-hosted,aws,cloud-platform,xlarge,x64 ]
     environment: ${{ inputs.approval == 'per-stack' && format('{0}-tfapply-core', inputs.environment) || inputs.environment }}
     timeout-minutes: 45

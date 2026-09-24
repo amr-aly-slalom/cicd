@@ -63,4 +63,4 @@ runs:
       run: |
         terraform workspace select -or-create "$WORKSPACE"
         aws s3 cp "s3://$PLAN_S3_PATH" tfapply
-        terraform apply -input=false -lock-timeout=10m -parallelism=20 tfapply
+        terraform apply -input=false -lock-timeout=10m tfapply

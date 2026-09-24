@@ -10,36 +10,21 @@
 # environment fills in over successive pipeline runs - core first, then the
 # stacks that only need core, then the ones that also need redshift.
 #
-# Usage: tf-upstreams-deployed.sh <stack-name> <environment> <upstream-dir>...
-#   Initializes and selects the workspace in each upstream dir itself (init
-#   is cheap here - the provider cache is baked into the image, no network
-#   involved) rather than assuming an earlier step in the same job already
-#   did so: an upstream's own Terraform Init is skipped whenever ITS plan
-#   is (see tf-deploy.yaml's own comment on prepare's plan_<stack> outputs),
-#   which is unrelated to whether something else needs to read its output.
-#   No -or-create on the workspace select, unlike every stack's own plan-
-#   time init - a workspace that doesn't exist yet genuinely means this
-#   upstream isn't deployed in this environment, which is exactly the
-#   "missing" case below, not something to paper over.
+# Usage: tf-upstreams-deployed.sh <stack-name> <upstream-dir>...
+#   Each upstream dir is expected to have been `terraform init`-ed with the
+#   target workspace selected by an earlier step in the same job. An upstream
+#   that wasn't - because its own plan was skipped for the same reason -
+#   counts as not deployed.
 #
 # Writes ready=true|false to $GITHUB_OUTPUT, and a notice naming what's
 # missing when it skips.
 set -euo pipefail
 
 stack="${1:?stack name}"
-environment="${2:?environment}"
-shift 2
+shift
 
 missing=()
 for dir in "$@"; do
-  if ! terraform -chdir="$dir" init -input=false >/dev/null 2>&1; then
-    missing+=("$dir")
-    continue
-  fi
-  if ! terraform -chdir="$dir" workspace select "$environment" >/dev/null 2>&1; then
-    missing+=("$dir")
-    continue
-  fi
   # `terraform output -json` prints sensitive outputs in plaintext - keep it
   # in this variable and only ever test it, never echo it.
   if ! outputs=$(terraform -chdir="$dir" output -json 2>/dev/null); then
